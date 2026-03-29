@@ -4,8 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-
-	"server/handlers" // ensure this import path matches your folder structure
+	"server/handlers"
 
 	"github.com/rs/cors"
 )
@@ -45,7 +44,7 @@ func main() {
 	})
 
 	// Start server
-	log.Println("Server is running on onrender")
+	log.Println("Server is running on localhost.")
 	if err := http.ListenAndServe(":8080", c.Handler(mux)); err != nil {
 		log.Fatal(err)
 	}
