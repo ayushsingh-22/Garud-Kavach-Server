@@ -6,28 +6,20 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
 	"server/db"
 	"server/models"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 )
 
 var jwtKey []byte
 
-func init() {
-	_ = godotenv.Load()
-
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		log.Fatal("JWT_SECRET environment variable is required")
-	}
-
-	jwtKey = []byte(secret)
+// SetJwtKey allows the main application to set the key after loading the environment
+func SetJwtKey(key []byte) {
+	jwtKey = key
 }
 
 func unauthorizedJSON(w http.ResponseWriter) {
@@ -145,10 +137,9 @@ func CheckLoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"authenticated": true,
-		"user_id":       claims["user_id"],
-		"email":         claims["email"],
-		"role":          claims["role"],
+		"id":    claims["user_id"],
+		"email": claims["email"],
+		"role":  claims["role"],
 	})
 }
 

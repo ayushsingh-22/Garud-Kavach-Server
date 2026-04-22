@@ -19,6 +19,13 @@ func main() {
 
 	db.Init()
 
+	// Set JWT key after loading environment
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is required")
+	}
+	handlers.SetJwtKey([]byte(jwtSecret))
+
 	if os.Getenv("GEMINI_API_KEY") == "" {
 		log.Println("Warning: GEMINI_API_KEY environment variable not set. Chatbot functionality will not work properly.")
 	}
@@ -28,13 +35,20 @@ func main() {
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
+	mux.HandleFunc("/api/signup", handlers.SignUpHandler)
 	mux.Handle("/api/login", middleware.LoginRateLimit(http.HandlerFunc(handlers.LoginHandler)))
 	mux.HandleFunc("/api/logout", handlers.LogoutHandler)
-	// Protect sensitive routes with JWT middleware
-	mux.Handle("/api/getAllQueries", handlers.JWTAuthMiddleware(http.HandlerFunc(handlers.GetAllQueries)))
+	// Protect sensitive routes with JWT middleware and role-based access control
+	getAllQueriesHandler := http.HandlerFunc(handlers.GetAllQueries)
+	mux.Handle("/api/getAllQueries", handlers.JWTAuthMiddleware(handlers.RequireRole("superadmin", "manager")(getAllQueriesHandler)))
+
+	analyticsHandler := http.HandlerFunc(handlers.AnalyticsHandler)
+	mux.Handle("/api/analytics", handlers.JWTAuthMiddleware(handlers.RequireRole("superadmin", "manager")(analyticsHandler)))
+
+	updateStatusHandler := http.HandlerFunc(handlers.UpdateQueryStatus)
+	mux.Handle("/api/updateStatus", handlers.JWTAuthMiddleware(updateStatusHandler)) // Assuming all authenticated users can update status for now
+
 	mux.HandleFunc("/api/add-query", handlers.AddQuery)
-	mux.Handle("/api/updateStatus", handlers.JWTAuthMiddleware(http.HandlerFunc(handlers.UpdateQueryStatus)))
-	mux.Handle("/api/analytics", handlers.JWTAuthMiddleware(http.HandlerFunc(handlers.AnalyticsHandler)))
 	mux.HandleFunc("/api/chat", handlers.ChatHandler)
 	mux.Handle("/api/check-login", handlers.JWTAuthMiddleware(http.HandlerFunc(handlers.CheckLoginHandler)))
 
