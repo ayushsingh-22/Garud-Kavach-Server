@@ -4,108 +4,29 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
-	"os"
-	"path/filepath"
-	"sort"
 	"time"
 
+	"server/db"
 	"server/models"
 )
 
 func AnalyticsHandler(w http.ResponseWriter, r *http.Request) {
-	// Set content type early to ensure JSON response
 	w.Header().Set("Content-Type", "application/json")
 
-	// Get absolute path to database file
-	path, err := filepath.Abs("database.json")
+	topServices, pieChartData, err := fetchServiceRevenue()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve database path"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load service revenue analytics"})
 		return
 	}
 
-	file, err := os.Open(path)
+	monthlyList, err := fetchMonthlyRevenue()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read database file"})
-		return
-	}
-	defer file.Close()
-
-	var queries []models.Query
-	if err := json.NewDecoder(file).Decode(&queries); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse JSON data"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load monthly revenue analytics"})
 		return
 	}
 
-	// Calculate revenue by service and by month
-	serviceRevenueMap := make(map[string]float64)
-	monthlyRevenueMap := make(map[string]float64)
-	layout := "2006-01-02T15:04:05Z" // RFC3339 format without microseconds
-
-	for _, q := range queries {
-		// Skip entries with zero cost
-		if q.Cost <= 0 {
-			continue
-		}
-
-		serviceRevenueMap[q.Service] += q.Cost
-
-		// Safely parse the date
-		t, err := time.Parse(layout, q.SubmittedAt)
-		if err != nil {
-			// Try alternate format with timezone name
-			t, err = time.Parse("2006-01-02T15:04:05-07:00", q.SubmittedAt)
-			if err != nil {
-				// Skip this entry if date can't be parsed
-				continue
-			}
-		}
-
-		monthYear := t.Format("Jan 2006")
-		monthlyRevenueMap[monthYear] += q.Cost
-	}
-
-	// Top 3 Services
-	var serviceList []models.TopService
-	for k, v := range serviceRevenueMap {
-		serviceList = append(serviceList, models.TopService{Service: k, Revenue: v})
-	}
-	sort.Slice(serviceList, func(i, j int) bool {
-		return serviceList[i].Revenue > serviceList[j].Revenue
-	})
-	topServices := serviceList
-	if len(topServices) > 3 {
-		topServices = topServices[:3]
-	}
-
-	// Pie Chart Data
-	var pieChartData []models.ServiceRevenue
-	for k, v := range serviceRevenueMap {
-		pieChartData = append(pieChartData, models.ServiceRevenue{Name: k, Value: v})
-	}
-
-	// Monthly Revenue with Growth
-	var monthlyList []models.MonthlyRevenue
-	for k, v := range monthlyRevenueMap {
-		monthlyList = append(monthlyList, models.MonthlyRevenue{Month: k, Revenue: v})
-	}
-
-	// Sort monthly data chronologically
-	sort.Slice(monthlyList, func(i, j int) bool {
-		ti, err := time.Parse("Jan 2006", monthlyList[i].Month)
-		if err != nil {
-			return false
-		}
-		tj, err := time.Parse("Jan 2006", monthlyList[j].Month)
-		if err != nil {
-			return true
-		}
-		return ti.Before(tj)
-	})
-
-	// Calculate month-over-month growth
 	for i := range monthlyList {
 		if i > 0 && monthlyList[i-1].Revenue > 0 {
 			prev := monthlyList[i-1].Revenue
@@ -117,13 +38,81 @@ func AnalyticsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Final JSON response
 	resp := map[string]any{
 		"topServices":    topServices,
 		"pieChartData":   pieChartData,
 		"monthlyRevenue": monthlyList,
 	}
 
-	// Encode and send the response
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func fetchServiceRevenue() ([]models.TopService, []models.ServiceRevenue, error) {
+	rows, err := db.DB.Query(`
+		SELECT service, SUM(cost)::float8 AS revenue
+		FROM queries
+		WHERE cost > 0 AND deleted_at IS NULL
+		GROUP BY service
+		ORDER BY revenue DESC`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	topServices := make([]models.TopService, 0)
+	pieChartData := make([]models.ServiceRevenue, 0)
+
+	for rows.Next() {
+		var service string
+		var revenue float64
+		if err := rows.Scan(&service, &revenue); err != nil {
+			return nil, nil, err
+		}
+
+		pieChartData = append(pieChartData, models.ServiceRevenue{Name: service, Value: revenue})
+		topServices = append(topServices, models.TopService{Service: service, Revenue: revenue})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	if len(topServices) > 3 {
+		topServices = topServices[:3]
+	}
+
+	return topServices, pieChartData, nil
+}
+
+func fetchMonthlyRevenue() ([]models.MonthlyRevenue, error) {
+	rows, err := db.DB.Query(`
+		SELECT DATE_TRUNC('month', submitted_at) AS month_start, SUM(cost)::float8 AS revenue
+		FROM queries
+		WHERE cost > 0 AND deleted_at IS NULL
+		GROUP BY 1
+		ORDER BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	monthlyRevenue := make([]models.MonthlyRevenue, 0)
+	for rows.Next() {
+		var monthStart time.Time
+		var revenue float64
+		if err := rows.Scan(&monthStart, &revenue); err != nil {
+			return nil, err
+		}
+
+		monthlyRevenue = append(monthlyRevenue, models.MonthlyRevenue{
+			Month:   monthStart.Format("Jan 2006"),
+			Revenue: revenue,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return monthlyRevenue, nil
 }

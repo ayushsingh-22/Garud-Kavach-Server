@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"server/db"
 	"server/handlers"
 	"server/middleware"
 
@@ -15,6 +16,8 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("Warning: .env file not loaded, relying on system environment variables")
 	}
+
+	db.Init()
 
 	if os.Getenv("GEMINI_API_KEY") == "" {
 		log.Println("Warning: GEMINI_API_KEY environment variable not set. Chatbot functionality will not work properly.")
@@ -48,7 +51,7 @@ func main() {
 	})
 
 	// Start server
-	log.Println("Server is running on localhost.")
+	log.Println("Server is running on localhost:8080.")
 	if err := http.ListenAndServe(":8080", c.Handler(mux)); err != nil {
 		log.Fatal(err)
 	}

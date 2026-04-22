@@ -2,15 +2,21 @@ package handlers
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"net/http"
-	"os"
-	"server/models"
+	"server/db"
+	"strings"
 )
 
 type UpdateRequest struct {
 	ID     int    `json:"id"`
 	Status string `json:"status"`
+}
+
+var allowedStatuses = map[string]struct{}{
+	"Pending":     {},
+	"In Progress": {},
+	"Resolved":    {},
+	"Rejected":    {},
 }
 
 func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
@@ -29,45 +35,40 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := ioutil.ReadFile("database.json")
+	status := strings.TrimSpace(req.Status)
+	if _, ok := allowedStatuses[status]; !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid status"})
+		return
+	}
+
+	if req.ID <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid query id"})
+		return
+	}
+
+	result, err := db.DB.Exec(
+		"UPDATE queries SET status = $1 WHERE id = $2 AND deleted_at IS NULL",
+		status,
+		req.ID,
+	)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Unable to read database"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update query status"})
 		return
 	}
 
-	var queries []models.Query
-	if err := json.Unmarshal(data, &queries); err != nil {
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse database"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify update status"})
 		return
 	}
 
-	updated := false
-	for i := range queries {
-		if queries[i].ID == req.ID {
-			queries[i].Status = req.Status
-			updated = true
-			break
-		}
-	}
-
-	if !updated {
+	if rowsAffected == 0 {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Query not found"})
-		return
-	}
-
-	updatedData, err := json.MarshalIndent(queries, "", "  ")
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to encode updated data"})
-		return
-	}
-
-	if err := os.WriteFile("database.json", updatedData, 0644); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to write updated data"})
 		return
 	}
 

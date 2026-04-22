@@ -2,65 +2,87 @@ package handlers
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
-	"os"
-	"path/filepath"
-	"sort"
+	"time"
 
+	"server/db"
 	"server/models"
 )
 
 func GetAllQueries(w http.ResponseWriter, r *http.Request) {
-	// Get the absolute path of the database file
-	path, err := filepath.Abs("database.json")
-	if err != nil {
-		http.Error(w, "Failed to resolve file path", http.StatusInternalServerError)
-		return
-	}
-
-	log.Println("Reading database from:", path)
-
-	// Read the file data
-	data, err := os.ReadFile(path)
-	if err != nil {
-		http.Error(w, "Unable to read database file", http.StatusInternalServerError)
-		return
-	}
-
-	// Unmarshal the data into a slice of models.Query
-	var queries []models.Query
-	if err := json.Unmarshal(data, &queries); err != nil {
-		http.Error(w, "Invalid JSON format", http.StatusInternalServerError)
-		log.Println("JSON parsing error:", err)
-		return
-	}
-
-	// log.Printf("Found %d queries before sorting", len(queries))
-
-	// Debug: Log the IDs before sorting
-	var idsBeforeSorting []int
-	for _, q := range queries {
-		idsBeforeSorting = append(idsBeforeSorting, q.ID)
-	}
-	// log.Printf("IDs before sorting: %v", idsBeforeSorting)
-
-	// Sort the queries by ID in DESCENDING order
-	sort.SliceStable(queries, func(i, j int) bool {
-		return queries[i].ID > queries[j].ID
-	})
-
-	// Debug: Log the IDs after sorting
-	var idsAfterSorting []int
-	for _, q := range queries {
-		idsAfterSorting = append(idsAfterSorting, q.ID)
-	}
-	// log.Printf("IDs after sorting: %v", idsAfterSorting)
-
-	// Don't reassign IDs - keep original descending order
-
-	// Set header and response status, then encode and send the sorted queries as JSON
 	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := db.DB.Query(`
+		SELECT
+			id,
+			name,
+			email,
+			COALESCE(phone, ''),
+			COALESCE(service, ''),
+			COALESCE(message, ''),
+			submitted_at,
+			num_guards::text,
+			COALESCE(duration_type, ''),
+			COALESCE(duration_value::text, '0'),
+			camera_required,
+			vehicle_required,
+			first_aid,
+			walkie_talkie,
+			bullet_proof,
+			fire_safety,
+			COALESCE(status, 'Pending'),
+			COALESCE(cost, 0)
+		FROM queries
+		WHERE deleted_at IS NULL
+		ORDER BY submitted_at DESC`)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Unable to load queries"})
+		return
+	}
+	defer rows.Close()
+
+	queries := make([]models.Query, 0)
+	for rows.Next() {
+		var query models.Query
+		var submittedAt time.Time
+
+		err := rows.Scan(
+			&query.ID,
+			&query.Name,
+			&query.Email,
+			&query.Phone,
+			&query.Service,
+			&query.Message,
+			&submittedAt,
+			&query.NumGuards,
+			&query.DurationType,
+			&query.DurationValue,
+			&query.CameraRequired,
+			&query.VehicleRequired,
+			&query.FirstAid,
+			&query.WalkieTalkie,
+			&query.BulletProof,
+			&query.FireSafety,
+			&query.Status,
+			&query.Cost,
+		)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse query rows"})
+			return
+		}
+
+		query.SubmittedAt = submittedAt.UTC().Format(time.RFC3339)
+		queries = append(queries, query)
+	}
+
+	if err := rows.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Error while reading query rows"})
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(queries)
+	_ = json.NewEncoder(w).Encode(queries)
 }

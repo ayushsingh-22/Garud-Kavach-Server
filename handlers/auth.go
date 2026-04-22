@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"server/db"
 	"server/models"
 	"strings"
 	"time"
@@ -16,9 +18,6 @@ import (
 )
 
 var jwtKey []byte
-
-const fallbackAdminUserID = 1
-const fallbackAdminRole = "superadmin"
 
 func init() {
 	_ = godotenv.Load()
@@ -65,17 +64,6 @@ func parseTokenClaimsFromRequest(r *http.Request) (jwt.MapClaims, error) {
 	return parseTokenClaims(cookie.Value)
 }
 
-func getFallbackAdminCredentials() (string, string, error) {
-	adminEmail := strings.TrimSpace(os.Getenv("ADMIN_EMAIL"))
-	adminPasswordHash := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD_HASH"))
-
-	if adminEmail == "" || adminPasswordHash == "" {
-		return "", "", errors.New("missing ADMIN_EMAIL or ADMIN_PASSWORD_HASH")
-	}
-
-	return adminEmail, adminPasswordHash, nil
-}
-
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {
@@ -91,27 +79,40 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	adminEmail, adminPasswordHash, err := getFallbackAdminCredentials()
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Server misconfiguration: missing admin credentials"})
-		return
-	}
-
-	if !strings.EqualFold(login.Email, adminEmail) {
+	email := strings.TrimSpace(strings.ToLower(login.Email))
+	if email == "" || strings.TrimSpace(login.Password) == "" {
 		unauthorizedJSON(w)
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(adminPasswordHash), []byte(login.Password)); err != nil {
+	var userID int
+	var passwordHash string
+	var role string
+	err := db.DB.QueryRow(
+		"SELECT id, password, role FROM users WHERE email = $1 AND deleted_at IS NULL",
+		email,
+	).Scan(&userID, &passwordHash, &role)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			unauthorizedJSON(w)
+			return
+		}
+
+		log.Printf("ERROR: Database error during login for email %s: %v", email, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify credentials"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(login.Password)); err != nil {
 		unauthorizedJSON(w)
 		return
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id": fallbackAdminUserID,
-		"email":   adminEmail,
-		"role":    fallbackAdminRole,
+		"user_id": userID,
+		"email":   email,
+		"role":    role,
 		"exp":     time.Now().Add(24 * time.Hour).Unix(),
 	})
 
