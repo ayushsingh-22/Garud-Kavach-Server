@@ -8,6 +8,7 @@ import (
 	"server/handlers"
 	"server/middleware"
 
+	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 	"github.com/rs/cors"
 )
@@ -29,28 +30,39 @@ func main() {
 	if os.Getenv("GEMINI_API_KEY") == "" {
 		log.Println("Warning: GEMINI_API_KEY environment variable not set. Chatbot functionality will not work properly.")
 	}
-	mux := http.NewServeMux()
+	r := mux.NewRouter()
 
-	// Routes
-	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	})
-	mux.HandleFunc("/api/signup", handlers.SignUpHandler)
-	mux.Handle("/api/login", middleware.LoginRateLimit(http.HandlerFunc(handlers.LoginHandler)))
-	mux.HandleFunc("/api/logout", handlers.LogoutHandler)
-	// Protect sensitive routes with JWT middleware and role-based access control
-	getAllQueriesHandler := http.HandlerFunc(handlers.GetAllQueries)
-	mux.Handle("/api/getAllQueries", handlers.JWTAuthMiddleware(handlers.RequireRole("superadmin", "manager")(getAllQueriesHandler)))
+	// Public Routes
+	r.HandleFunc("/api/signup", handlers.SignUpHandler).Methods("POST")
+	r.Handle("/api/login", middleware.LoginRateLimit(http.HandlerFunc(handlers.LoginHandler))).Methods("POST")
+	r.HandleFunc("/api/logout", handlers.LogoutHandler).Methods("POST")
+	r.HandleFunc("/api/add-query", handlers.AddQuery).Methods("POST")
+	r.HandleFunc("/api/chat", handlers.ChatHandler).Methods("POST")
 
-	analyticsHandler := http.HandlerFunc(handlers.AnalyticsHandler)
-	mux.Handle("/api/analytics", handlers.JWTAuthMiddleware(handlers.RequireRole("superadmin", "manager")(analyticsHandler)))
+	// Authenticated Routes
+	s := r.PathPrefix("/api").Subrouter()
+	s.Use(handlers.JWTAuthMiddleware)
 
-	updateStatusHandler := http.HandlerFunc(handlers.UpdateQueryStatus)
-	mux.Handle("/api/updateStatus", handlers.JWTAuthMiddleware(updateStatusHandler)) // Assuming all authenticated users can update status for now
+	// -- General Authenticated
+	s.HandleFunc("/check-login", handlers.CheckLoginHandler).Methods("GET")
+	s.HandleFunc("/updateStatus", handlers.UpdateQueryStatus).Methods("POST")
 
-	mux.HandleFunc("/api/add-query", handlers.AddQuery)
-	mux.HandleFunc("/api/chat", handlers.ChatHandler)
-	mux.Handle("/api/check-login", handlers.JWTAuthMiddleware(http.HandlerFunc(handlers.CheckLoginHandler)))
+	// -- Manager & SuperAdmin Routes
+	managerRouter := s.PathPrefix("").Subrouter()
+	managerRouter.Use(handlers.RequireRole("superadmin", "manager"))
+	managerRouter.HandleFunc("/getAllQueries", handlers.GetAllQueries).Methods("GET")
+	managerRouter.HandleFunc("/analytics", handlers.AnalyticsHandler).Methods("GET")
+	managerRouter.HandleFunc("/guards", handlers.GetGuards).Methods("GET")
+	managerRouter.HandleFunc("/guards", handlers.CreateGuard).Methods("POST")
+	managerRouter.HandleFunc("/guards/{id}", handlers.SoftDeleteGuard).Methods("DELETE")
+
+	// -- SuperAdmin Only Routes
+	adminRouter := s.PathPrefix("/admin").Subrouter()
+	adminRouter.Use(handlers.RequireRole("superadmin"))
+	adminRouter.HandleFunc("/users", handlers.GetAdminUsers).Methods("GET")
+	adminRouter.HandleFunc("/users", handlers.CreateAdminUser).Methods("POST")
+	adminRouter.HandleFunc("/users/{id}", handlers.SoftDeleteUser).Methods("DELETE")
+	adminRouter.HandleFunc("/audit-logs", handlers.GetAuditLogs).Methods("GET")
 
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{
@@ -66,7 +78,7 @@ func main() {
 
 	// Start server
 	log.Println("Server is running on localhost:8080.")
-	if err := http.ListenAndServe(":8080", c.Handler(mux)); err != nil {
+	if err := http.ListenAndServe(":8080", c.Handler(r)); err != nil {
 		log.Fatal(err)
 	}
 }
