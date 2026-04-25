@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"server/db"
+	"server/helpers"
 	"server/models"
 )
 
@@ -112,6 +114,15 @@ func AddQuery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save query"})
 		return
+	}
+
+	if err := helpers.WriteAuditLog(db.DB, 0, "create_query", "query:"+strconv.Itoa(insertedID), map[string]interface{}{
+		"name":    newQuery.Name,
+		"email":   newQuery.Email,
+		"service": newQuery.Service,
+		"status":  newQuery.Status,
+	}); err != nil {
+		log.Printf("ERROR: Failed to write audit log for create_query: %v", err)
 	}
 
 	w.WriteHeader(http.StatusCreated)

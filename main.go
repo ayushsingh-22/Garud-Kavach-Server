@@ -45,24 +45,31 @@ func main() {
 
 	// -- General Authenticated
 	s.HandleFunc("/check-login", handlers.CheckLoginHandler).Methods("GET")
-	s.HandleFunc("/updateStatus", handlers.UpdateQueryStatus).Methods("POST")
 
 	// -- Manager & SuperAdmin Routes
 	managerRouter := s.PathPrefix("").Subrouter()
 	managerRouter.Use(handlers.RequireRole("superadmin", "manager"))
+	managerRouter.HandleFunc("/updateStatus", handlers.UpdateQueryStatus).Methods("POST")
 	managerRouter.HandleFunc("/getAllQueries", handlers.GetAllQueries).Methods("GET")
 	managerRouter.HandleFunc("/analytics", handlers.AnalyticsHandler).Methods("GET")
 	managerRouter.HandleFunc("/guards", handlers.GetGuards).Methods("GET")
+	managerRouter.HandleFunc("/guards/{id:[0-9]+}", handlers.GetGuardByID).Methods("GET")
 	managerRouter.HandleFunc("/guards", handlers.CreateGuard).Methods("POST")
-	managerRouter.HandleFunc("/guards/{id}", handlers.SoftDeleteGuard).Methods("DELETE")
+	managerRouter.HandleFunc("/guards/expiring", handlers.GetExpiringGuards).Methods("GET")
+	managerRouter.HandleFunc("/guards/{id:[0-9]+}", handlers.UpdateGuard).Methods("PUT")
+	managerRouter.HandleFunc("/guards/{id:[0-9]+}", handlers.SoftDeleteGuard).Methods("DELETE")
+	managerRouter.HandleFunc("/guards/{id:[0-9]+}/assign", handlers.AssignGuard).Methods("POST")
 
 	// -- SuperAdmin Only Routes
 	adminRouter := s.PathPrefix("/admin").Subrouter()
 	adminRouter.Use(handlers.RequireRole("superadmin"))
 	adminRouter.HandleFunc("/users", handlers.GetAdminUsers).Methods("GET")
 	adminRouter.HandleFunc("/users", handlers.CreateAdminUser).Methods("POST")
+	adminRouter.HandleFunc("/users/{id}", handlers.UpdateAdminUser).Methods("PUT")
 	adminRouter.HandleFunc("/users/{id}", handlers.SoftDeleteUser).Methods("DELETE")
-	adminRouter.HandleFunc("/audit-logs", handlers.GetAuditLogs).Methods("GET")
+
+	// Allow manager to access audit logs as per Phase 3.6
+	managerRouter.HandleFunc("/admin/audit-logs", handlers.GetAuditLogs).Methods("GET")
 
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{

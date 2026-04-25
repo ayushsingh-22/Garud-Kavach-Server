@@ -13,4 +13,10 @@ require (
 	golang.org/x/time v0.15.0
 )
 
-require github.com/gorilla/mux v1.8.1 // indirect
+require (
+	github.com/cloudinary/cloudinary-go/v2 v2.15.0 // indirect
+	github.com/creasty/defaults v1.7.0 // indirect
+	github.com/google/uuid v1.5.0 // indirect
+	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/gorilla/schema v1.4.1 // indirect
+)

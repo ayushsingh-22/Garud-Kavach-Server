@@ -2,8 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"server/db"
+	"server/helpers"
+	"strconv"
 	"strings"
 )
 
@@ -70,6 +73,15 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Query not found"})
 		return
+	}
+
+	// Audit Log
+	var userID int
+	if uid, ok := r.Context().Value(userIDKey).(float64); ok {
+		userID = int(uid)
+	}
+	if err := helpers.WriteAuditLog(db.DB, userID, "status_update", "query:"+strconv.Itoa(req.ID), map[string]string{"new_status": status}); err != nil {
+		log.Printf("ERROR: Failed to write audit log for status_update: %v", err)
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})

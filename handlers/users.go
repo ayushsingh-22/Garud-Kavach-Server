@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"server/db"
 	"server/helpers"
@@ -34,7 +35,7 @@ func SignUpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 	if err != nil {
 		http.Error(w, `{"error":"Failed to hash password"}`, http.StatusInternalServerError)
 		return
@@ -53,7 +54,9 @@ func SignUpHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Audit Log
 	userID, _ := r.Context().Value(userIDKey).(float64)
-	helpers.WriteAuditLog(db.DB, int(userID), "create_user", "user:"+strconv.Itoa(newUserID), req)
+	if err := helpers.WriteAuditLog(db.DB, int(userID), "create_user", "user:"+strconv.Itoa(newUserID), req); err != nil {
+		log.Printf("ERROR: Failed to write audit log for create_user: %v", err)
+	}
 
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "User created successfully"})
 }
@@ -101,7 +104,7 @@ func CreateAdminUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 	if err != nil {
 		http.Error(w, `{"error":"Failed to hash password"}`, http.StatusInternalServerError)
 		return
@@ -120,10 +123,80 @@ func CreateAdminUser(w http.ResponseWriter, r *http.Request) {
 
 	// Audit Log
 	userID, _ := r.Context().Value(userIDKey).(float64)
-	helpers.WriteAuditLog(db.DB, int(userID), "create_admin_user", "user:"+strconv.Itoa(newUserID), req)
+	if err := helpers.WriteAuditLog(db.DB, int(userID), "create_admin_user", "user:"+strconv.Itoa(newUserID), req); err != nil {
+		log.Printf("ERROR: Failed to write audit log for create_admin_user: %v", err)
+	}
 
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]int{"id": newUserID})
+}
+
+// UpdateAdminUser updates an existing admin user
+func UpdateAdminUser(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id, err := strconv.Atoi(vars["id"])
+	if err != nil {
+		http.Error(w, `{"error":"Invalid user ID"}`, http.StatusBadRequest)
+		return
+	}
+
+	var req SignUpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"Invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Validation
+	if req.Role != "manager" && req.Role != "finance" && req.Role != "hr" && req.Role != "superadmin" {
+		http.Error(w, `{"error":"Invalid role specified."}`, http.StatusBadRequest)
+		return
+	}
+
+	var result int64
+	if req.Password != "" {
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to hash password"}`, http.StatusInternalServerError)
+			return
+		}
+
+		res, err := db.DB.Exec(
+			"UPDATE users SET name = $1, email = $2, role = $3, password = $4 WHERE id = $5 AND deleted_at IS NULL",
+			req.Name, req.Email, req.Role, string(hashedPassword), id,
+		)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to update user"}`, http.StatusInternalServerError)
+			return
+		}
+		result, _ = res.RowsAffected()
+	} else {
+		res, err := db.DB.Exec(
+			"UPDATE users SET name = $1, email = $2, role = $3 WHERE id = $4 AND deleted_at IS NULL",
+			req.Name, req.Email, req.Role, id,
+		)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to update user"}`, http.StatusInternalServerError)
+			return
+		}
+		result, _ = res.RowsAffected()
+	}
+
+	if result == 0 {
+		http.Error(w, `{"error":"User not found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Audit Log
+	currentUserID, _ := r.Context().Value(userIDKey).(float64)
+	if err := helpers.WriteAuditLog(db.DB, int(currentUserID), "update_user", "user:"+strconv.Itoa(id), map[string]interface{}{
+		"updated_name": req.Name,
+		"updated_role": req.Role,
+	}); err != nil {
+		log.Printf("ERROR: Failed to write audit log for update_user: %v", err)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "User updated successfully"})
 }
 
 // SoftDeleteUser marks a user as deleted.
@@ -155,7 +228,9 @@ func SoftDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Audit Log
-	helpers.WriteAuditLog(db.DB, int(currentUserID), "delete_user", "user:"+strconv.Itoa(id), nil)
+	if err := helpers.WriteAuditLog(db.DB, int(currentUserID), "delete_user", "user:"+strconv.Itoa(id), nil); err != nil {
+		log.Printf("ERROR: Failed to write audit log for delete_user: %v", err)
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
