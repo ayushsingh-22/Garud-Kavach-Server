@@ -24,6 +24,7 @@ func main() {
 	seedGuards()
 	seedQueries()
 	seedAuditLogs()
+	seedFinanceAndHR()
 
 	fmt.Println("Seeding completed successfully.")
 }
@@ -121,4 +122,82 @@ func seedAuditLogs() {
 		}
 	}
 	fmt.Println("Audit logs seeded.")
+}
+
+func seedFinanceAndHR() {
+	// Seed Invoices
+	var queryIDs []int
+	rows, err := db.DB.Query("SELECT id FROM queries WHERE status != 'Pending' LIMIT 10")
+	if err == nil {
+		for rows.Next() {
+			var id int
+			rows.Scan(&id)
+			queryIDs = append(queryIDs, id)
+		}
+		rows.Close()
+	}
+
+	invoiceStatuses := []string{"pending", "paid"}
+	for _, qID := range queryIDs {
+		status := invoiceStatuses[rand.Intn(len(invoiceStatuses))]
+		amount := float64(rand.Intn(10000) + 5000)
+		issuedAt := time.Now().Add(-time.Duration(rand.Intn(30*24)) * time.Hour)
+
+		var paidAt interface{}
+		if status == "paid" {
+			paidTime := issuedAt.Add(time.Duration(rand.Intn(5*24)) * time.Hour)
+			paidAt = paidTime
+		}
+
+		db.DB.Exec("INSERT INTO invoices (query_id, amount, status, issued_at, paid_at) VALUES ($1, $2, $3, $4, $5)",
+			qID, amount, status, issuedAt, paidAt)
+	}
+	fmt.Println("Invoices seeded.")
+
+	// Seed Expenses
+	var superadminID int
+	db.DB.QueryRow("SELECT id FROM users WHERE role = 'superadmin' LIMIT 1").Scan(&superadminID)
+
+	categories := []string{"Equipment", "Travel", "Office Supplies", "Marketing"}
+	for i := 0; i < 5; i++ {
+		cat := categories[rand.Intn(len(categories))]
+		amount := float64(rand.Intn(5000) + 500)
+		date := time.Now().Add(-time.Duration(rand.Intn(30*24)) * time.Hour).Format("2006-01-02")
+
+		db.DB.Exec("INSERT INTO expenses (category, description, amount, expense_date, added_by) VALUES ($1, $2, $3, $4, $5)",
+			cat, "Dummy expense for "+cat, amount, date, superadminID)
+	}
+	fmt.Println("Expenses seeded.")
+
+	// Seed Shifts & Payroll
+	var guardIDs []int
+	rows, err = db.DB.Query("SELECT id FROM guards WHERE status = 'active' LIMIT 5")
+	if err == nil {
+		for rows.Next() {
+			var id int
+			rows.Scan(&id)
+			guardIDs = append(guardIDs, id)
+		}
+		rows.Close()
+	}
+
+	if len(guardIDs) > 0 && len(queryIDs) > 0 {
+		for _, gID := range guardIDs {
+			for i := 0; i < 3; i++ {
+				qID := queryIDs[rand.Intn(len(queryIDs))]
+				start := time.Now().Add(-time.Duration(rand.Intn(15*24)) * time.Hour)
+				end := start.Add(time.Duration(8) * time.Hour)
+
+				db.DB.Exec("INSERT INTO shifts (guard_id, query_id, start_time, end_time, actual_hours, status) VALUES ($1, $2, $3, $4, $5, $6)",
+					gID, qID, start, end, 8.0, "completed")
+			}
+
+			// Add leave request
+			start := time.Now().Add(time.Duration(rand.Intn(10*24)) * time.Hour).Format("2006-01-02")
+			end := time.Now().Add(time.Duration(rand.Intn(10*24)+48) * time.Hour).Format("2006-01-02")
+			db.DB.Exec("INSERT INTO leave_requests (guard_id, start_date, end_date, reason, status) VALUES ($1, $2, $3, $4, $5)",
+				gID, start, end, "Personal reasons", "pending")
+		}
+		fmt.Println("Shifts and Leaves seeded.")
+	}
 }

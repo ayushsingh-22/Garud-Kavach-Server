@@ -52,13 +52,17 @@ func main() {
 	managerRouter.HandleFunc("/updateStatus", handlers.UpdateQueryStatus).Methods("POST")
 	managerRouter.HandleFunc("/getAllQueries", handlers.GetAllQueries).Methods("GET")
 	managerRouter.HandleFunc("/analytics", handlers.AnalyticsHandler).Methods("GET")
-	managerRouter.HandleFunc("/guards", handlers.GetGuards).Methods("GET")
-	managerRouter.HandleFunc("/guards/{id:[0-9]+}", handlers.GetGuardByID).Methods("GET")
-	managerRouter.HandleFunc("/guards", handlers.CreateGuard).Methods("POST")
-	managerRouter.HandleFunc("/guards/expiring", handlers.GetExpiringGuards).Methods("GET")
-	managerRouter.HandleFunc("/guards/{id:[0-9]+}", handlers.UpdateGuard).Methods("PUT")
-	managerRouter.HandleFunc("/guards/{id:[0-9]+}", handlers.SoftDeleteGuard).Methods("DELETE")
-	managerRouter.HandleFunc("/guards/{id:[0-9]+}/assign", handlers.AssignGuard).Methods("POST")
+
+	// -- Guards Routes (SuperAdmin, Manager, HR)
+	guardsRouter := s.PathPrefix("/guards").Subrouter()
+	guardsRouter.Use(handlers.RequireRole("superadmin", "manager", "hr"))
+	guardsRouter.HandleFunc("", handlers.GetGuards).Methods("GET")
+	guardsRouter.HandleFunc("/{id:[0-9]+}", handlers.GetGuardByID).Methods("GET")
+	guardsRouter.HandleFunc("", handlers.CreateGuard).Methods("POST")
+	guardsRouter.HandleFunc("/expiring", handlers.GetExpiringGuards).Methods("GET")
+	guardsRouter.HandleFunc("/{id:[0-9]+}", handlers.UpdateGuard).Methods("PUT")
+	guardsRouter.HandleFunc("/{id:[0-9]+}", handlers.SoftDeleteGuard).Methods("DELETE")
+	guardsRouter.HandleFunc("/{id:[0-9]+}/assign", handlers.AssignGuard).Methods("POST")
 
 	// -- SuperAdmin Only Routes
 	adminRouter := s.PathPrefix("/admin").Subrouter()
@@ -67,6 +71,27 @@ func main() {
 	adminRouter.HandleFunc("/users", handlers.CreateAdminUser).Methods("POST")
 	adminRouter.HandleFunc("/users/{id}", handlers.UpdateAdminUser).Methods("PUT")
 	adminRouter.HandleFunc("/users/{id}", handlers.SoftDeleteUser).Methods("DELETE")
+
+	// -- Finance Routes
+	financeRouter := s.PathPrefix("/finance").Subrouter()
+	financeRouter.Use(handlers.RequireRole("superadmin", "finance"))
+	financeRouter.HandleFunc("/invoices", handlers.GetInvoices).Methods("GET")
+	financeRouter.HandleFunc("/reports", handlers.GetFinanceReports).Methods("GET")
+	financeRouter.HandleFunc("/expenses", handlers.CreateExpense).Methods("POST")
+	financeRouter.HandleFunc("/expenses", handlers.GetExpenses).Methods("GET")
+	financeRouter.HandleFunc("/invoices/{id:[0-9]+}", handlers.UpdateInvoiceStatus).Methods("PUT")
+
+	// -- HR Routes
+	hrRouter := s.PathPrefix("/hr").Subrouter()
+	hrRouter.Use(handlers.RequireRole("superadmin", "hr"))
+	hrRouter.HandleFunc("/shifts", handlers.GetShifts).Methods("GET")
+	hrRouter.HandleFunc("/shifts", handlers.CreateShift).Methods("POST")
+	hrRouter.HandleFunc("/shifts/{id:[0-9]+}", handlers.UpdateShift).Methods("PUT")
+	hrRouter.HandleFunc("/payroll", handlers.GetPayroll).Methods("GET")
+	hrRouter.HandleFunc("/payroll/finalize", handlers.FinalizePayroll).Methods("POST")
+	hrRouter.HandleFunc("/leaves", handlers.GetLeaves).Methods("GET")
+	hrRouter.HandleFunc("/leaves/{id:[0-9]+}", handlers.UpdateLeaveStatus).Methods("PUT")
+	hrRouter.HandleFunc("/guards/expiring", handlers.GetExpiringGuards).Methods("GET")
 
 	// Allow manager to access audit logs as per Phase 3.6
 	managerRouter.HandleFunc("/admin/audit-logs", handlers.GetAuditLogs).Methods("GET")
