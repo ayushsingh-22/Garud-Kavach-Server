@@ -7,6 +7,7 @@ import (
 	"server/db"
 	"server/handlers"
 	"server/middleware"
+	"server/services"
 
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
@@ -19,6 +20,10 @@ func main() {
 	}
 
 	db.Init()
+
+	// Start background services
+	services.StartEmailWorker()
+	services.StartGuardLicenseChecker(db.DB)
 
 	// Set JWT key after loading environment
 	jwtSecret := os.Getenv("JWT_SECRET")
@@ -34,6 +39,7 @@ func main() {
 
 	// Public Routes
 	r.HandleFunc("/api/signup", handlers.SignUpHandler).Methods("POST")
+	r.HandleFunc("/api/register", handlers.RegisterCustomerHandler).Methods("POST")
 	r.Handle("/api/login", middleware.LoginRateLimit(http.HandlerFunc(handlers.LoginHandler))).Methods("POST")
 	r.HandleFunc("/api/logout", handlers.LogoutHandler).Methods("POST")
 	r.HandleFunc("/api/add-query", handlers.AddQuery).Methods("POST")
@@ -95,6 +101,19 @@ func main() {
 
 	// Allow manager to access audit logs as per Phase 3.6
 	managerRouter.HandleFunc("/admin/audit-logs", handlers.GetAuditLogs).Methods("GET")
+
+	// -- Customer Routes
+	customerRouter := s.PathPrefix("/customer").Subrouter()
+	customerRouter.Use(handlers.RequireRole("customer"))
+	customerRouter.HandleFunc("/profile", handlers.GetCustomerProfile).Methods("GET")
+	customerRouter.HandleFunc("/profile", handlers.UpdateCustomerProfile).Methods("PUT")
+	customerRouter.HandleFunc("/password", handlers.UpdateCustomerPassword).Methods("PUT")
+	customerRouter.HandleFunc("/queries", handlers.GetCustomerQueries).Methods("GET")
+
+	// -- Notification Routes (all authenticated users)
+	s.HandleFunc("/notifications", handlers.GetNotifications).Methods("GET")
+	s.HandleFunc("/notifications/read", handlers.MarkNotificationsRead).Methods("POST")
+	s.HandleFunc("/notifications/test", handlers.SendTestNotification).Methods("POST")
 
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{

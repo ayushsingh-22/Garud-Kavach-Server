@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"server/db"
 	"server/helpers"
+	"server/services"
 	"strconv"
 	"strings"
 )
@@ -83,6 +85,31 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 	if err := helpers.WriteAuditLog(db.DB, userID, "status_update", "query:"+strconv.Itoa(req.ID), map[string]string{"new_status": status}); err != nil {
 		log.Printf("ERROR: Failed to write audit log for status_update: %v", err)
 	}
+
+	// Phase 6: Notify the query owner about status change and send email
+	go func() {
+		var queryUserID *int
+		var queryEmail, queryName string
+		err := db.DB.QueryRow(
+			"SELECT user_id, email, name FROM queries WHERE id = $1",
+			req.ID,
+		).Scan(&queryUserID, &queryEmail, &queryName)
+		if err != nil {
+			log.Printf("WARNING: Could not fetch query owner for notification: %v", err)
+			return
+		}
+
+		msg := fmt.Sprintf("Your request status has been updated to %s", status)
+		if queryUserID != nil {
+			_ = helpers.CreateNotification(db.DB, *queryUserID, msg, "info")
+		}
+
+		if strings.TrimSpace(queryEmail) != "" {
+			subject := fmt.Sprintf("Service Request Update — %s", status)
+			body := fmt.Sprintf("<h2>Hello %s,</h2><p>%s</p><p>Reference: #%d</p>", queryName, msg, req.ID)
+			services.EnqueueEmail(queryEmail, queryName, subject, body)
+		}
+	}()
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }

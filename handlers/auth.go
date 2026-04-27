@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -168,7 +169,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 // Middleware to protect routes
 func JWTAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := parseTokenClaimsFromRequest(r)
+		claims, err := parseTokenClaimsFromRequest(r)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -176,6 +177,15 @@ func JWTAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// Add user info to context for downstream handlers
+		ctx := r.Context()
+		if role, ok := claims["role"].(string); ok {
+			ctx = context.WithValue(ctx, userRoleKey, role)
+		}
+		if userID, ok := claims["user_id"]; ok {
+			ctx = context.WithValue(ctx, userIDKey, userID)
+		}
+
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

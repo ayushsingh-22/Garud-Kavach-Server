@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"server/db"
 	"server/helpers"
+	"server/services"
 	"strconv"
 	"strings"
 	"time"
@@ -566,6 +568,31 @@ func AssignGuard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Failed to assign guard"}`, http.StatusInternalServerError)
 		return
 	}
+
+	// Phase 6: Notify the query owner about guard assignment
+	go func() {
+		var queryUserID *int
+		var queryEmail, queryName string
+		err := db.DB.QueryRow(
+			"SELECT user_id, email, name FROM queries WHERE id = $1",
+			req.QueryID,
+		).Scan(&queryUserID, &queryEmail, &queryName)
+		if err != nil {
+			log.Printf("WARNING: Could not fetch query owner for guard assignment notification: %v", err)
+			return
+		}
+
+		msg := "A guard has been assigned to your request"
+		if queryUserID != nil {
+			_ = helpers.CreateNotification(db.DB, *queryUserID, msg, "success")
+		}
+		if strings.TrimSpace(queryEmail) != "" {
+			services.EnqueueEmail(queryEmail, queryName,
+				fmt.Sprintf("Guard Assigned — Reference #%d", req.QueryID),
+				fmt.Sprintf("<h2>Hello %s,</h2><p>%s. Our team is preparing to serve you.</p>", queryName, msg),
+			)
+		}
+	}()
 
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Guard assigned successfully"})
