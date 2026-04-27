@@ -1,176 +1,217 @@
 package handlers
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
+	"errors"
+	"fmt"
+	"html"
 	"log"
 	"net/http"
-	"os"
-
-	"github.com/joho/godotenv"
+	"regexp"
+	"server/db"
+	"server/services"
+	chatSvc "server/services/chat"
+	"strings"
+	"time"
+	"unicode/utf8"
 )
 
-func init() {
-	// Load .env file, ignore error if not found (for production environments)
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("No .env file found or failed to load")
-	}
-}
+// ---- request / response types -------------------------------------------
 
-// ChatRequest represents the structure of incoming chat requests
+// ChatRequest is the incoming body for POST /api/chat.
 type ChatRequest struct {
-	Message string `json:"message"`
-	Context string `json:"context"`
+	Message string                `json:"message"`
+	History []chatSvc.HistoryTurn `json:"history"`
 }
 
-// GeminiRequest represents the structure of requests to Gemini API
-type GeminiRequest struct {
-	Contents []GeminiContent `json:"contents"`
-}
-
-// GeminiContent represents a message in the Gemini API request
-type GeminiContent struct {
-	Parts []GeminiPart `json:"parts"`
-	Role  string       `json:"role"`
-}
-
-// GeminiPart represents a part of a message
-type GeminiPart struct {
-	Text string `json:"text"`
-}
-
-// GeminiResponse represents the structure of responses from Gemini API
-type GeminiResponse struct {
-	Candidates []struct {
-		Content struct {
-			Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"content"`
-	} `json:"candidates"`
-}
-
-// ChatResponse is the response sent back to the client
+// ChatResponse is the outgoing body for POST /api/chat.
+// The field "reply" replaces the old "response" field to match the new spec.
 type ChatResponse struct {
-	Response string `json:"response"`
+	Reply   string               `json:"reply"`
+	Actions []chatSvc.ChatAction `json:"actions,omitempty"`
 }
 
-// ChatHandler handles chat requests and communicates with Gemini API
+// contactRequestPayload matches the contact_request action payload.
+type contactRequestPayload struct {
+	Name    string `json:"name"`
+	Email   string `json:"email"`
+	Message string `json:"message"`
+}
+
+// ---- constants ----------------------------------------------------------
+
+const (
+	maxMessageRunes = 2000
+	maxHistoryTurns = 10
+)
+
+var contactEmailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+
+// ---- handler ------------------------------------------------------------
+
+// ChatHandler handles POST /api/chat.
+// Auth is optional: if a valid JWT cookie is present, user context is populated;
+// otherwise the request proceeds as a guest session.
 func ChatHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var chatReq ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&chatReq); err != nil {
-		log.Printf("Error decoding request body: %v", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		log.Println("GEMINI_API_KEY environment variable not set")
-		http.Error(w, "Server configuration error", http.StatusInternalServerError)
-		return
-	}
-
-	systemPrompt := `You are a helpful assistant for a security service company.
-Your job is to help users learn about and potentially book security services.
-
-Available services include:
-- Club Guards: Security personnel specialized for nightclubs and entertainment venues
-- Event Security: Guards for special events, concerts, and gatherings
-- Personal Security: Bodyguards and personal protection services
-- Property Guards: Security for residential and commercial properties
-- Corporate Security: Comprehensive security solutions for businesses
-
-Pricing information:
-- Base cost per guard: ₹1000
-- Service charge: ₹1000
-- GST: 18%
-- Optional add-ons:
-  - Camera surveillance: ₹500
-  - Security vehicle: ₹2500
-  - First aid training: ₹150
-  - Walkie-talkie equipment: ₹500
-  - Bulletproof vests: ₹2000
-  - Fire safety training: ₹750
-
-Keep responses brief, friendly, and professional. If users express interest in booking, suggest they start the booking process.`
-
-	geminiReq := GeminiRequest{
-		Contents: []GeminiContent{
-			{
-				Parts: []GeminiPart{
-					{Text: systemPrompt},
-				},
-				Role: "model",
-			},
-			{
-				Parts: []GeminiPart{
-					{Text: chatReq.Context},
-				},
-				Role: "user",
-			},
-			{
-				Parts: []GeminiPart{
-					{Text: chatReq.Message},
-				},
-				Role: "user",
-			},
-		},
-	}
-
-	reqBody, err := json.Marshal(geminiReq)
-	if err != nil {
-		log.Printf("Error marshaling request: %v", err)
-		http.Error(w, "Error preparing request", http.StatusInternalServerError)
-		return
-	}
-
-	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key="+apiKey, bytes.NewBuffer(reqBody))
-	if err != nil {
-		log.Printf("Error creating request: %v", err)
-		http.Error(w, "Error preparing request", http.StatusInternalServerError)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Error sending request to Gemini API: %v", err)
-		http.Error(w, "Error communicating with AI service", http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Error reading response body: %v", err)
-		http.Error(w, "Error processing AI response", http.StatusInternalServerError)
-		return
-	}
-
-	var geminiResp GeminiResponse
-	if err := json.Unmarshal(respBody, &geminiResp); err != nil {
-		log.Printf("Error unmarshaling response: %v", err)
-		http.Error(w, "Error processing AI response", http.StatusInternalServerError)
-		return
-	}
-
-	var responseText string
-	if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
-		responseText = geminiResp.Candidates[0].Content.Parts[0].Text
-	} else {
-		responseText = "I'm sorry, I couldn't process your request. Please try again."
-	}
-
-	chatResp := ChatResponse{Response: responseText}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(chatResp)
+	start := time.Now()
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// --- Decode body ---
+	var req ChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	// --- Input validation & sanitisation ---
+	req.Message = strings.TrimSpace(req.Message)
+	if req.Message == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "message is required"})
+		return
+	}
+	if utf8.RuneCountInString(req.Message) > maxMessageRunes {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "message too long (max 2000 characters)"})
+		return
+	}
+
+	// Cap history to last N turns
+	if len(req.History) > maxHistoryTurns {
+		req.History = req.History[len(req.History)-maxHistoryTurns:]
+	}
+
+	// Escape HTML for safe logging and downstream use
+	sanitisedMessage := html.EscapeString(req.Message)
+
+	// --- Optional auth: populate user context if a valid token cookie exists ---
+	var userCtx *chatSvc.UserContext
+	claims, authErr := parseTokenClaimsFromRequest(r)
+	if authErr == nil {
+		uid, _ := claims["user_id"].(float64)
+		role, _ := claims["role"].(string)
+		if role != "" {
+			userCtx = &chatSvc.UserContext{
+				ID:   int(uid),
+				Role: role,
+			}
+		}
+	}
+
+	userLabel := "guest"
+	roleLabel := "guest"
+	if userCtx != nil {
+		userLabel = fmt.Sprintf("u:%d", userCtx.ID)
+		roleLabel = userCtx.Role
+	}
+
+	// --- Run the chat engine ---
+	result, err := chatSvc.Run(db.DB, userCtx, sanitisedMessage, req.History)
+	latency := time.Since(start)
+	if err != nil {
+		if errors.Is(err, chatSvc.ErrGeminiRateLimit) || errors.Is(err, chatSvc.ErrAllProvidersBusy) {
+			log.Printf("[chat] ts=%s user=%s role=%s latency=%dms ALL_PROVIDERS_BUSY",
+				time.Now().UTC().Format(time.RFC3339), userLabel, roleLabel, latency.Milliseconds())
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "AI assistant is busy, please try again in a moment"})
+			return
+		}
+		log.Printf("[chat] ts=%s user=%s role=%s latency=%dms ERROR=%v",
+			time.Now().UTC().Format(time.RFC3339), userLabel, roleLabel, latency.Milliseconds(), err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "chat service unavailable"})
+		return
+	}
+
+	// --- Handle contact_request actions (server-side email dispatch) ---
+	result.Actions = handleContactActions(result.Actions)
+
+	// --- Structured log: timestamp, userId, role, intent, latency — no message body ---
+	intent := actionsLabel(result.Actions)
+	log.Printf("[chat] ts=%s user=%s role=%s intent=%s latency=%dms",
+		time.Now().UTC().Format(time.RFC3339), userLabel, roleLabel, intent, latency.Milliseconds())
+
+	_ = json.NewEncoder(w).Encode(ChatResponse{
+		Reply:   result.Reply,
+		Actions: result.Actions,
+	})
+}
+
+// handleContactActions iterates the action list and, for any contact_request
+// with a complete, valid payload, fires the existing email pipeline and removes
+// the action from the response (it has been handled server-side).
+// Actions with incomplete payloads are kept so the frontend can collect missing fields.
+func handleContactActions(actions []chatSvc.ChatAction) []chatSvc.ChatAction {
+	kept := make([]chatSvc.ChatAction, 0, len(actions))
+	for _, a := range actions {
+		if a.Type != "contact_request" {
+			kept = append(kept, a)
+			continue
+		}
+
+		payloadBytes, err := json.Marshal(a.Payload)
+		if err != nil {
+			kept = append(kept, a)
+			continue
+		}
+		var p contactRequestPayload
+		if err := json.Unmarshal(payloadBytes, &p); err != nil {
+			kept = append(kept, a)
+			continue
+		}
+
+		p.Name = strings.TrimSpace(p.Name)
+		p.Email = strings.TrimSpace(strings.ToLower(p.Email))
+		p.Message = strings.TrimSpace(p.Message)
+
+		// If payload is incomplete, return the action so the frontend can collect fields.
+		if p.Name == "" || !contactEmailRegex.MatchString(p.Email) || p.Message == "" {
+			kept = append(kept, a)
+			continue
+		}
+
+		// Acknowledge the enquirer using the existing email pipeline.
+		services.EnqueueEmail(
+			p.Email,
+			p.Name,
+			"We received your enquiry — Garud Kavach",
+			"<h2>Thank you, "+html.EscapeString(p.Name)+"!</h2>"+
+				"<p>We have received your enquiry and our team will respond shortly.</p>"+
+				"<p>Your message: "+html.EscapeString(p.Message)+"</p>",
+		)
+
+		// Forward the enquiry to the company inbox using the same pipeline.
+		services.EnqueueEmail(
+			"contact@rakshakservice.com",
+			"Garud Kavach Team",
+			"Chatbot Enquiry from "+html.EscapeString(p.Name),
+			"<h2>Chatbot Contact Request</h2>"+
+				"<p><strong>Name:</strong> "+html.EscapeString(p.Name)+"</p>"+
+				"<p><strong>Email:</strong> "+html.EscapeString(p.Email)+"</p>"+
+				"<p><strong>Message:</strong><br>"+html.EscapeString(p.Message)+"</p>",
+		)
+
+		log.Printf("[chat] contact_request dispatched via email pipeline for email=%s", p.Email)
+		// Do not keep this action — it was fully handled.
+	}
+	return kept
+}
+
+// actionsLabel returns a short string describing the actions list for logging.
+func actionsLabel(actions []chatSvc.ChatAction) string {
+	if len(actions) == 0 {
+		return "reply"
+	}
+	types := make([]string, 0, len(actions))
+	for _, a := range actions {
+		types = append(types, a.Type)
+	}
+	return strings.Join(types, ",")
 }

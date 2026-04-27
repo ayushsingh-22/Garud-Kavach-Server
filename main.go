@@ -43,7 +43,7 @@ func main() {
 	r.Handle("/api/login", middleware.LoginRateLimit(http.HandlerFunc(handlers.LoginHandler))).Methods("POST")
 	r.HandleFunc("/api/logout", handlers.LogoutHandler).Methods("POST")
 	r.HandleFunc("/api/add-query", handlers.AddQuery).Methods("POST")
-	r.HandleFunc("/api/chat", handlers.ChatHandler).Methods("POST")
+	r.Handle("/api/chat", middleware.ChatRateLimit(http.HandlerFunc(handlers.ChatHandler))).Methods("POST")
 
 	// Authenticated Routes
 	s := r.PathPrefix("/api").Subrouter()
