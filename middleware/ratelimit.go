@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -10,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"server/services"
 )
 
 type visitor struct {
@@ -88,6 +92,27 @@ func (rl *LoginLimiter) Middleware(next http.Handler) http.Handler {
 		}
 
 		ip := clientIP(r.RemoteAddr)
+
+		// ── Redis-backed rate limiting (when available) ──────────────────────
+		if services.IsRedisAvailable() {
+			const maxAttempts = 5
+			const window = 3 * time.Minute
+			key := fmt.Sprintf("rl:login:%s", ip)
+			ctx := context.Background()
+
+			count, err := services.RedisIncrWithExpire(ctx, key, window)
+			if err == nil && count > maxAttempts {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "180")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Too many login attempts. Please try again later."})
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// ── In-memory fallback ───────────────────────────────────────────────
 		limiter := rl.getLimiter(ip)
 
 		if !limiter.Allow() {

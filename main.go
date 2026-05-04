@@ -22,6 +22,7 @@ func main() {
 	db.Init()
 
 	// Start background services
+	services.InitRedis()
 	services.StartEmailWorker()
 	services.StartGuardLicenseChecker(db.DB)
 
@@ -42,6 +43,7 @@ func main() {
 	r.HandleFunc("/api/register", handlers.RegisterCustomerHandler).Methods("POST")
 	r.Handle("/api/login", middleware.LoginRateLimit(http.HandlerFunc(handlers.LoginHandler))).Methods("POST")
 	r.HandleFunc("/api/logout", handlers.LogoutHandler).Methods("POST")
+	r.HandleFunc("/api/auth/refresh", handlers.RefreshTokenHandler).Methods("POST")
 	r.HandleFunc("/api/add-query", handlers.AddQuery).Methods("POST")
 	r.Handle("/api/chat", middleware.ChatRateLimit(http.HandlerFunc(handlers.ChatHandler))).Methods("POST")
 
@@ -113,7 +115,24 @@ func main() {
 	// -- Notification Routes (all authenticated users)
 	s.HandleFunc("/notifications", handlers.GetNotifications).Methods("GET")
 	s.HandleFunc("/notifications/read", handlers.MarkNotificationsRead).Methods("POST")
-	s.HandleFunc("/notifications/test", handlers.SendTestNotification).Methods("POST")
+
+	// ── Phase 9: WebSocket guard tracking ────────────────────────────────────────
+	// WebSocket routes handle their own auth via query param / cookie,
+	// so they live on the root router (not the JWT subrouter).
+	r.HandleFunc("/ws/guard", handlers.ServeGuardWS)
+	r.HandleFunc("/ws/admin", handlers.ServeAdminWS)
+
+	// Guard PWA REST endpoint — auth via X-Guard-Token header (no JWT required)
+	r.HandleFunc("/api/guard/incidents", handlers.GuardCreateIncident).Methods("POST")
+
+	// Live guard status + incidents (manager/superadmin only, via subrouter)
+	guardsRouter.HandleFunc("/live", handlers.GetConnectedGuards).Methods("GET")
+	guardsRouter.HandleFunc("/{id:[0-9]+}/token", handlers.GetGuardToken).Methods("GET")
+	guardsRouter.HandleFunc("/{id:[0-9]+}/sos/clear", handlers.AcknowledgeSOS).Methods("POST")
+	managerRouter.HandleFunc("/incidents", handlers.GetIncidents).Methods("GET")
+	// Phase 9.6 — auto shift assignment
+	managerRouter.HandleFunc("/queries/{id:[0-9]+}/auto-assign", handlers.AutoAssignGuards).Methods("POST")
+	// ─────────────────────────────────────────────────────────────────────────────
 
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{
@@ -121,15 +140,18 @@ func main() {
 			"https://rakshak-service-ayushsingh-22s-projects.vercel.app",
 			"https://rakshak-service-git-main-ayushsingh-22s-projects.vercel.app",
 			"http://localhost:3000",
+			"http://localhost:5174",     // Guard PWA dev server
+			"http://192.168.31.66:3000", // LAN dev (mobile testing)
+			"http://192.168.31.66:5174", // Guard PWA LAN
 		},
 		AllowCredentials: true,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type"},
+		AllowedHeaders:   []string{"Content-Type", "X-Guard-Token"},
 	})
 
 	// Start server
 	log.Println("Server is running on localhost:8080.")
-	if err := http.ListenAndServe(":8080", c.Handler(r)); err != nil {
+	if err := http.ListenAndServe(":8080", middleware.SecurityHeaders(c.Handler(r))); err != nil {
 		log.Fatal(err)
 	}
 }

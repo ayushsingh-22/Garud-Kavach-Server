@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     id          SERIAL PRIMARY KEY,
     user_id     INT REFERENCES users(id) ON DELETE CASCADE,
     message     TEXT NOT NULL,
-    type        TEXT DEFAULT 'info' CHECK (type IN ('info', 'warning', 'success', 'error')),
+    type        TEXT DEFAULT 'info' CHECK (type IN ('info', 'warning', 'success', 'error', 'sos')),
     read        BOOLEAN DEFAULT FALSE,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );

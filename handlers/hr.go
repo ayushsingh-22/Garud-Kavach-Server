@@ -106,6 +106,23 @@ func CreateShift(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.GuardID <= 0 {
+		http.Error(w, `{"error":"Valid guard_id is required"}`, http.StatusBadRequest)
+		return
+	}
+	if req.QueryID <= 0 {
+		http.Error(w, `{"error":"Valid query_id is required"}`, http.StatusBadRequest)
+		return
+	}
+	if req.StartTime == nil || req.EndTime == nil {
+		http.Error(w, `{"error":"start_time and end_time are required"}`, http.StatusBadRequest)
+		return
+	}
+	if !req.EndTime.After(*req.StartTime) {
+		http.Error(w, `{"error":"end_time must be after start_time"}`, http.StatusBadRequest)
+		return
+	}
+
 	err := db.DB.QueryRow(`
 		INSERT INTO shifts (guard_id, query_id, start_time, end_time, status)
 		VALUES ($1, $2, $3, $4, $5)
@@ -138,6 +155,19 @@ func UpdateShift(w http.ResponseWriter, r *http.Request) {
 	var req Shift
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"Invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Status != "" && !helpers.ValidateStatus(req.Status, []string{"scheduled", "in_progress", "completed", "cancelled"}) {
+		http.Error(w, `{"error":"Invalid shift status"}`, http.StatusBadRequest)
+		return
+	}
+	if req.ActualHours < 0 {
+		http.Error(w, `{"error":"Actual hours cannot be negative"}`, http.StatusBadRequest)
+		return
+	}
+	if req.StartTime != nil && req.EndTime != nil && !req.EndTime.After(*req.StartTime) {
+		http.Error(w, `{"error":"end_time must be after start_time"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -340,7 +370,7 @@ func UpdateLeaveStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Status != "approved" && req.Status != "rejected" && req.Status != "pending" {
+	if !helpers.ValidateStatus(req.Status, []string{"approved", "rejected", "pending"}) {
 		http.Error(w, `{"error":"Invalid status"}`, http.StatusBadRequest)
 		return
 	}

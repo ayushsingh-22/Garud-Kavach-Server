@@ -87,35 +87,3 @@ func MarkNotificationsRead(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
-
-// SendTestNotification creates a sample notification for the current user.
-func SendTestNotification(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	userID, ok := r.Context().Value(userIDKey).(float64)
-	if !ok {
-		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
-		return
-	}
-
-	types := []string{"info", "success", "warning", "error"}
-	messages := []string{
-		"A new service query has been submitted and is awaiting review.",
-		"Guard assignment completed successfully for your query.",
-		"Your guard's license is expiring within 7 days. Please take action.",
-		"Payment for invoice #1042 has failed. Please update billing info.",
-	}
-
-	idx := int(userID) % len(types)
-
-	_, err := db.DB.Exec(
-		`INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)`,
-		int(userID), messages[idx], types[idx],
-	)
-	if err != nil {
-		http.Error(w, `{"error":"Failed to create test notification"}`, http.StatusInternalServerError)
-		return
-	}
-
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "Test notification sent"})
-}

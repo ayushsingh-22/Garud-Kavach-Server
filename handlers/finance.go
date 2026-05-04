@@ -7,6 +7,7 @@ import (
 	"server/db"
 	"server/helpers"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -133,6 +134,32 @@ func CreateExpense(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Category != nil {
+		trimmed := strings.TrimSpace(*req.Category)
+		if len(trimmed) > 200 {
+			http.Error(w, `{"error":"Category must not exceed 200 characters"}`, http.StatusBadRequest)
+			return
+		}
+		if trimmed == "" {
+			req.Category = nil
+		} else {
+			req.Category = &trimmed
+		}
+	}
+
+	if req.Description != nil {
+		trimmed := strings.TrimSpace(*req.Description)
+		if len(trimmed) > 1000 {
+			http.Error(w, `{"error":"Description must not exceed 1000 characters"}`, http.StatusBadRequest)
+			return
+		}
+		if trimmed == "" {
+			req.Description = nil
+		} else {
+			req.Description = &trimmed
+		}
+	}
+
 	expDate, err := time.Parse("2006-01-02", req.ExpenseDate)
 	if err != nil {
 		http.Error(w, `{"error":"Invalid expense date"}`, http.StatusBadRequest)
@@ -183,7 +210,7 @@ func UpdateInvoiceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Status != "pending" && req.Status != "paid" && req.Status != "refunded" {
+	if !helpers.ValidateStatus(req.Status, []string{"pending", "paid", "refunded"}) {
 		http.Error(w, `{"error":"Invalid status"}`, http.StatusBadRequest)
 		return
 	}

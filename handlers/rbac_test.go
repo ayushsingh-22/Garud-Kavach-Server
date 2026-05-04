@@ -103,7 +103,7 @@ func TestRBACMiddleware(t *testing.T) {
 					token += "tamper"
 				}
 
-				req.AddCookie(&http.Cookie{Name: "token", Value: token})
+				req.AddCookie(&http.Cookie{Name: "access_token", Value: token})
 			}
 
 			rr := httptest.NewRecorder()
@@ -111,6 +111,85 @@ func TestRBACMiddleware(t *testing.T) {
 
 			if status := rr.Code; status != tt.expectStatus {
 				t.Errorf("handler returned wrong status code: got %v want %v", status, tt.expectStatus)
+			}
+		})
+	}
+}
+
+// TestRBACPhase36 covers the additional role escalation scenarios introduced
+// in Phases 3–6 of the implementation plan.
+func TestRBACPhase36(t *testing.T) {
+	// Guards endpoints — require superadmin / manager / hr
+	guardsDeleteHandler := JWTAuthMiddleware(RequireRole("superadmin", "manager", "hr")(testHandler))
+
+	// HR endpoints — require superadmin / hr
+	hrShiftCreateHandler := JWTAuthMiddleware(RequireRole("superadmin", "hr")(testHandler))
+
+	// Finance endpoints — require superadmin / finance
+	financeExpenseHandler := JWTAuthMiddleware(RequireRole("superadmin", "finance")(testHandler))
+
+	// Admin user list — require superadmin only
+	adminUsersHandler := JWTAuthMiddleware(RequireRole("superadmin")(testHandler))
+
+	// Notifications — require any authenticated user (just JWTAuthMiddleware)
+	notifReadHandler := JWTAuthMiddleware(testHandler)
+
+	tests := []struct {
+		name         string
+		handler      http.Handler
+		role         string // empty = no cookie (unauthenticated)
+		expectStatus int
+	}{
+		// 1. Customer → DELETE /api/guards/:id → 403
+		{"Customer cannot delete guard", guardsDeleteHandler, "customer", http.StatusForbidden},
+
+		// 2. Finance → POST /api/hr/shifts → 403
+		{"Finance cannot create HR shift", hrShiftCreateHandler, "finance", http.StatusForbidden},
+
+		// 3. HR → GET /api/admin/users → 403
+		{"HR cannot list admin users", adminUsersHandler, "hr", http.StatusForbidden},
+
+		// 4. Unauthenticated → POST /api/notifications/read → 401
+		{"Unauthenticated cannot mark notifications", notifReadHandler, "", http.StatusUnauthorized},
+
+		// 5. Customer → POST /api/finance/expenses → 403
+		{"Customer cannot create expense", financeExpenseHandler, "customer", http.StatusForbidden},
+
+		// 6. Finance → POST /api/hr/shifts → 403 (duplicate with different description for clarity)
+		{"Finance cannot view HR payroll", hrShiftCreateHandler, "finance", http.StatusForbidden},
+
+		// 7. Valid superadmin passes all checks
+		{"Superadmin can delete guard", guardsDeleteHandler, "superadmin", http.StatusOK},
+		{"Superadmin can create HR shift", hrShiftCreateHandler, "superadmin", http.StatusOK},
+		{"Superadmin can list admin users", adminUsersHandler, "superadmin", http.StatusOK},
+		{"Superadmin can create finance expense", financeExpenseHandler, "superadmin", http.StatusOK},
+
+		// 8. Correct role can access its own routes
+		{"HR can create shift", hrShiftCreateHandler, "hr", http.StatusOK},
+		{"Finance can create expense", financeExpenseHandler, "finance", http.StatusOK},
+
+		// 9. Authenticated customer can read notifications (all authenticated users)
+		{"Customer can read own notifications", notifReadHandler, "customer", http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest("POST", "/", nil)
+
+			if tt.role != "" {
+				token, err := createTestToken(tt.role, time.Now().Add(time.Hour))
+				if err != nil {
+					t.Fatalf("Failed to create test token: %v", err)
+				}
+				req.AddCookie(&http.Cookie{Name: "access_token", Value: token})
+			}
+
+			rr := httptest.NewRecorder()
+			tt.handler.ServeHTTP(rr, req)
+
+			if status := rr.Code; status != tt.expectStatus {
+				t.Errorf("[%s] handler returned wrong status code: got %v want %v",
+					tt.name, status, tt.expectStatus)
 			}
 		})
 	}

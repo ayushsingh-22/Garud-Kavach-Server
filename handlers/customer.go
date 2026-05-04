@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"regexp"
 	"server/db"
-	"server/models"
+	"server/helpers"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -37,17 +37,17 @@ func RegisterCustomerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validation
-	name := strings.TrimSpace(req.Name)
-	email := strings.TrimSpace(strings.ToLower(req.Email))
-	password := req.Password
-
-	if name == "" {
+	name, nameErr := helpers.ValidateTrimLength(req.Name, 200)
+	if nameErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Name is required"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Name is required and must not exceed 200 characters"})
 		return
 	}
 
-	if !emailRegex.MatchString(email) {
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	password := req.Password
+
+	if !helpers.ValidateEmail(email) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid email format"})
 		return
@@ -194,8 +194,31 @@ func UpdateCustomerProfile(w http.ResponseWriter, r *http.Request) {
 
 	uid := int(userID)
 
-	// Update user name
+	// Validate fields
 	name := strings.TrimSpace(req.Name)
+	if len(name) > 200 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Name must not exceed 200 characters"})
+		return
+	}
+
+	phone := helpers.ValidatePhone(req.Phone)
+
+	company := strings.TrimSpace(req.Company)
+	if len(company) > 200 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Company must not exceed 200 characters"})
+		return
+	}
+
+	address := strings.TrimSpace(req.Address)
+	if len(address) > 500 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Address must not exceed 500 characters"})
+		return
+	}
+
+	// Update user name
 	if name != "" {
 		if _, err := db.DB.Exec("UPDATE users SET name = $1 WHERE id = $2", name, uid); err != nil {
 			log.Printf("ERROR: Failed to update user name: %v", err)
@@ -213,7 +236,7 @@ func UpdateCustomerProfile(w http.ResponseWriter, r *http.Request) {
 			phone = EXCLUDED.phone,
 			company = EXCLUDED.company,
 			address = EXCLUDED.address
-	`, uid, strings.TrimSpace(req.Phone), strings.TrimSpace(req.Company), strings.TrimSpace(req.Address))
+	`, uid, phone, company, address)
 
 	if err != nil {
 		log.Printf("ERROR: Failed to update customer profile: %v", err)
@@ -252,9 +275,11 @@ func GetCustomerQueries(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var queries []models.Query
+	// Phase-1: use queryWithGuards to include assigned guards
+	var queries []queryWithGuards
+	var queryIDs []int
 	for rows.Next() {
-		var q models.Query
+		var q queryWithGuards
 		if err := rows.Scan(
 			&q.ID, &q.Name, &q.Email, &q.Phone, &q.Service, &q.Message,
 			&q.NumGuards, &q.DurationType, &q.DurationValue,
@@ -265,11 +290,47 @@ func GetCustomerQueries(w http.ResponseWriter, r *http.Request) {
 			log.Printf("ERROR: Failed to scan query row: %v", err)
 			continue
 		}
+		q.AssignedGuards = []assignedGuardInfo{} // Phase-1: default empty slice
 		queries = append(queries, q)
+		queryIDs = append(queryIDs, q.ID)
 	}
 
 	if queries == nil {
-		queries = []models.Query{}
+		queries = []queryWithGuards{}
+	}
+
+	// ── Phase-1: Fetch assigned guards for customer's queries ────────────────
+	if len(queryIDs) > 0 {
+		// Build a safe IN-clause from verified integer IDs
+		idSet := make(map[int]bool, len(queryIDs))
+		for _, id := range queryIDs {
+			idSet[id] = true
+		}
+		guardRows, gErr := db.DB.Query(`
+			SELECT s.query_id, g.id, g.name
+			FROM   shifts s
+			JOIN   guards g ON g.id = s.guard_id
+			WHERE  s.deleted_at IS NULL
+			  AND  g.deleted_at IS NULL
+			ORDER  BY s.query_id, g.name`)
+		if gErr == nil {
+			defer guardRows.Close()
+			guardMap := make(map[int][]assignedGuardInfo)
+			for guardRows.Next() {
+				var qid, gid int
+				var gname string
+				if scanErr := guardRows.Scan(&qid, &gid, &gname); scanErr == nil {
+					if idSet[qid] {
+						guardMap[qid] = append(guardMap[qid], assignedGuardInfo{GuardID: gid, GuardName: gname})
+					}
+				}
+			}
+			for i := range queries {
+				if gs, ok := guardMap[queries[i].ID]; ok {
+					queries[i].AssignedGuards = gs
+				}
+			}
+		}
 	}
 
 	_ = json.NewEncoder(w).Encode(queries)

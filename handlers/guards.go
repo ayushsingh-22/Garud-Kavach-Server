@@ -8,7 +8,6 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
-	"net/mail"
 	"os"
 	"server/db"
 	"server/helpers"
@@ -65,17 +64,16 @@ func parseOptionalGuardDate(value string) (*time.Time, error) {
 }
 
 func validateGuard(g *Guard) error {
-	g.Name = strings.TrimSpace(g.Name)
-	if g.Name == "" {
-		return errBadRequest("Guard name is required")
+	name, err := helpers.ValidateTrimLength(g.Name, 200)
+	if err != nil {
+		return errBadRequest("Guard name is required and must not exceed 200 characters")
 	}
+	g.Name = name
 
 	if g.Status == "" {
 		g.Status = "active"
 	}
-	switch g.Status {
-	case "active", "inactive", "on_leave":
-	default:
+	if !helpers.ValidateStatus(g.Status, []string{"active", "inactive", "on_leave"}) {
 		return errBadRequest("Invalid guard status")
 	}
 
@@ -83,10 +81,19 @@ func validateGuard(g *Guard) error {
 		email := strings.TrimSpace(*g.Email)
 		if email == "" {
 			g.Email = nil
-		} else if _, err := mail.ParseAddress(email); err != nil {
+		} else if !helpers.ValidateEmail(email) {
 			return errBadRequest("Invalid guard email")
 		} else {
 			g.Email = &email
+		}
+	}
+
+	if g.Phone != nil {
+		cleaned := helpers.ValidatePhone(*g.Phone)
+		if cleaned == "" {
+			g.Phone = nil
+		} else {
+			g.Phone = &cleaned
 		}
 	}
 

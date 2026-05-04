@@ -31,5 +31,12 @@ func Init() {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
 
+	// Phase-2 fix: Ensure notifications.type CHECK constraint allows 'sos' value
+	_, _ = DB.Exec(`
+		ALTER TABLE notifications DROP CONSTRAINT IF EXISTS notifications_type_check;
+		ALTER TABLE notifications ADD CONSTRAINT notifications_type_check
+			CHECK (type IN ('info', 'warning', 'success', 'error', 'sos'));
+	`)
+
 	log.Println("Database connection successful.")
 }

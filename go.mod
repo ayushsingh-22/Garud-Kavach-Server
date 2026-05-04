@@ -14,9 +14,13 @@ require (
 )
 
 require (
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudinary/cloudinary-go/v2 v2.15.0 // indirect
 	github.com/creasty/defaults v1.7.0 // indirect
 	github.com/google/uuid v1.5.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/gorilla/schema v1.4.1 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/redis/go-redis/v9 v9.19.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 )

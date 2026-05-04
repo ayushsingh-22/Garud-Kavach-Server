@@ -17,13 +17,6 @@ type UpdateRequest struct {
 	Status string `json:"status"`
 }
 
-var allowedStatuses = map[string]struct{}{
-	"Pending":     {},
-	"In Progress": {},
-	"Resolved":    {},
-	"Rejected":    {},
-}
-
 func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json") // ✅ always set this early
 
@@ -41,7 +34,7 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := strings.TrimSpace(req.Status)
-	if _, ok := allowedStatuses[status]; !ok {
+	if !helpers.ValidateStatus(status, []string{"Pending", "In Progress", "Resolved", "Rejected"}) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid status"})
 		return
@@ -86,6 +79,32 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ERROR: Failed to write audit log for status_update: %v", err)
 	}
 
+	// ── Remove assigned shifts when status moves AWAY from Resolved ────────
+	var guardsRemoved bool
+	if status != "Resolved" {
+		result2, delErr := db.DB.Exec(
+			"UPDATE shifts SET deleted_at = NOW() WHERE query_id = $1 AND deleted_at IS NULL",
+			req.ID,
+		)
+		if delErr != nil {
+			log.Printf("WARNING: failed to remove shifts for query %d on status change: %v", req.ID, delErr)
+		} else if n, _ := result2.RowsAffected(); n > 0 {
+			guardsRemoved = true
+			log.Printf("INFO: removed %d shift(s) for query %d (status changed to %s)", n, req.ID, status)
+		}
+	}
+
+	// ── Phase-1: Auto-assign guards when status becomes "Resolved" ──────────
+	var assignedGuards []assignedGuard
+	var assignMsg string
+	var autoAssignErr error
+	if status == "Resolved" {
+		assignedGuards, assignMsg, autoAssignErr = runAutoAssign(req.ID)
+		if autoAssignErr != nil {
+			log.Printf("WARNING: auto-assign on Resolved failed for query %d: %v", req.ID, autoAssignErr)
+		}
+	}
+
 	// Phase 6: Notify the query owner about status change and send email
 	go func() {
 		var queryUserID *int
@@ -100,6 +119,16 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msg := fmt.Sprintf("Your request status has been updated to %s", status)
+
+		// Phase-1: If guards were assigned, append guard names to the notification
+		if len(assignedGuards) > 0 {
+			names := make([]string, len(assignedGuards))
+			for i, g := range assignedGuards {
+				names[i] = g.GuardName
+			}
+			msg += fmt.Sprintf(". Assigned guards: %s", strings.Join(names, ", "))
+		}
+
 		if queryUserID != nil {
 			_ = helpers.CreateNotification(db.DB, *queryUserID, msg, "info")
 		}
@@ -111,5 +140,21 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+	// Phase-1: Return assigned guards info when status is "Resolved"
+	response := map[string]interface{}{"status": "success"}
+	if guardsRemoved {
+		response["guardsRemoved"] = true
+	}
+	if len(assignedGuards) > 0 {
+		response["assignedGuards"] = assignedGuards
+		response["assignMessage"] = assignMsg
+	} else if status == "Resolved" {
+		// No guards assigned — surface the warning to the frontend
+		if autoAssignErr != nil {
+			response["autoAssignWarning"] = autoAssignErr.Error()
+		} else if assignMsg != "" {
+			response["autoAssignWarning"] = assignMsg
+		}
+	}
+	json.NewEncoder(w).Encode(response)
 }

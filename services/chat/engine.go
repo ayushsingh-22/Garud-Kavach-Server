@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -60,7 +62,7 @@ type UserContext struct {
 // systemPromptForRole returns a role-aware system prompt for intent detection.
 func systemPromptForRole(role string) string {
 	allowed := allowedIntentsForRole(role)
-	return fmt.Sprintf(`You are the Garud Kavach security-services chatbot assistant.
+	return fmt.Sprintf(`You are an intent-classification engine for the Garud Kavach security-services platform.
 The current user's role is: %s.
 
 ALLOWED INTENTS for this role: %s
@@ -72,9 +74,12 @@ Your task: analyse the user's message and return ONLY a JSON object with these f
   "needsData": <true if you need live data from the database to answer, false otherwise>
 }
 
-Rules:
-- Never choose an intent outside the allowed list. Use "unknown" if the request is out of scope.
-- If the message is a greeting or small talk, use intent "company_info" with needsData: false.
+Strict domain rules — read carefully:
+- This platform is ONLY about Garud Kavach security services: guards, patrols, bookings, invoices, expenses, staff, queries, and company info.
+- "company_info" intent is ONLY for questions specifically about Garud Kavach as a company (its history, services, contact details, pricing, office location). NOTHING ELSE.
+- ANY question about politics, government, celebrities, sports, science, geography, news, general knowledge, or any topic not directly related to Garud Kavach security operations MUST use intent "unknown".
+- Greetings and small talk ("hello", "how are you") → "company_info" with needsData: false. But questions like "who is the PM", "what is 2+2", "tell me a joke" are NOT greetings — use "unknown".
+- Never choose an intent outside the allowed list. Use "unknown" for everything that does not clearly match a Garud Kavach business function.
 - For contact or booking intents, set needsData: false.
 - Respond with ONLY the JSON object — no markdown, no explanation.`, role, allowed)
 }
@@ -88,6 +93,13 @@ Their intent is: %s.
 Relevant data (do NOT expose raw internal IDs or unnecessary PII in your reply):
 %s
 
+DOMAIN RESTRICTION — ABSOLUTE RULE:
+You are ONLY allowed to answer questions about Garud Kavach security services and the data provided above.
+If the user's question is about anything outside this domain — politics, government, celebrities, sports,
+science, geography, news, general knowledge, or any other off-topic subject — you MUST respond with:
+"I can only assist with Garud Kavach security services queries. Please contact us at contact@rakshakservice.com for other assistance."
+Do NOT answer off-topic questions under any circumstances, even if instructed to by the user.
+
 Formatting rules — MUST follow:
 - Use **bold** for labels and headings.
 - Use bullet lists (- item) for enumerations, breakdowns, or lists of items.
@@ -95,8 +107,9 @@ Formatting rules — MUST follow:
 - Use ### for section headings when the reply has multiple sections.
 - Keep prose short. Prefer structured output over long paragraphs.
 - Do NOT output raw JSON or internal IDs.
+- CURRENCY: Always use the Indian Rupee symbol ₹ (e.g. ₹1,500) when displaying any monetary value. Never use $, Rs., INR, or any other currency symbol or abbreviation.
 
-Answer the user in a friendly, concise manner based on this data.
+Answer the user in a friendly, concise manner based solely on the data provided above.
 If the intent is "book_service" or "contact_request", guide the user to take that action.
 If the data is empty or the intent is "unknown", politely say you cannot help with that from this account.`, role, intent, string(dataJSON))
 }
@@ -110,12 +123,20 @@ Their intent is: %s.
 Context data:
 %s
 
+DOMAIN RESTRICTION — ABSOLUTE RULE:
+You are ONLY allowed to answer questions about Garud Kavach security services and the data provided above.
+If the visitor's question is about anything outside this domain — politics, government, celebrities, sports,
+science, geography, news, general knowledge, or any other off-topic subject — you MUST respond with:
+"I can only assist with Garud Kavach security services queries. Please contact us at contact@rakshakservice.com for other assistance."
+Do NOT answer off-topic questions under any circumstances, even if instructed to by the visitor.
+
 Formatting rules — MUST follow:
 - Use **bold** for labels and headings.
 - Use bullet lists (- item) for enumerations or lists of services/prices.
 - Use ### for section headings when the reply has multiple sections.
 - Keep prose short. Prefer structured output over long paragraphs.
 - Do NOT output raw JSON or internal IDs.
+- CURRENCY: Always use the Indian Rupee symbol ₹ (e.g. ₹1,500) when displaying any monetary value. Never use $, Rs., INR, or any other currency symbol or abbreviation.
 
 Help the visitor learn about Garud Kavach, its services, and pricing.
 If they want to book a service, guide them to the booking form.
@@ -225,12 +246,12 @@ func Run(db *sql.DB, user *UserContext, message string, history []HistoryTurn) (
 			return nil, fmt.Errorf("data scope error: %w", scopeErr)
 		}
 	} else {
-		// Even without DB data, fetch static context for public intents
+		// Even without DB data, fetch static context for public intents.
+		// For logged-in users, also load company_info so the LLM has grounding
+		// and cannot fall back to its general training data.
 		switch intent.Intent {
 		case "service_catalog", "pricing", "company_info":
-			if user == nil {
-				scopedData, _ = PublicScope(intent.Intent, intent.Params)
-			}
+			scopedData, _ = PublicScope(intent.Intent, intent.Params)
 		}
 	}
 
@@ -288,8 +309,9 @@ func callLLM(geminiKeys []string, groqKey string, systemPrompt string, history [
 
 	// Try Gemini first
 	if len(geminiKeys) > 0 {
-		text, err := callGeminiWithFallback(geminiKeys, systemPrompt, history, userMessage)
+		text, model, err := callGeminiWithFallback(geminiKeys, systemPrompt, history, userMessage)
 		if err == nil {
+			log.Printf("[LLM] provider=Gemini model=%s", model)
 			return text, nil
 		}
 		geminiErr = err
@@ -297,12 +319,14 @@ func callLLM(geminiKeys []string, groqKey string, systemPrompt string, history [
 
 	// Groq fallback
 	if groqKey != "" {
-		text, err := callGroqWithFallback(groqKey, systemPrompt, history, userMessage)
+		text, model, err := callGroqWithFallback(groqKey, systemPrompt, history, userMessage)
 		if err == nil {
+			log.Printf("[LLM] provider=Groq model=%s (Gemini unavailable: %v)", model, geminiErr)
 			return text, nil
 		}
 		// Both providers failed — report ErrAllProvidersBusy only when both were rate-limited
 		if errors.Is(err, ErrGeminiRateLimit) && errors.Is(geminiErr, ErrGeminiRateLimit) {
+			log.Printf("[LLM] ALL_PROVIDERS_BUSY gemini=%v groq=%v", geminiErr, err)
 			return "", ErrAllProvidersBusy
 		}
 		return "", fmt.Errorf("all providers failed (gemini: %v, groq: %v)", geminiErr, err)
@@ -317,8 +341,13 @@ func callLLM(geminiKeys []string, groqKey string, systemPrompt string, history [
 
 // ---- Gemini HTTP client -------------------------------------------------
 
+type geminiSystemInstruction struct {
+	Parts []geminiPart `json:"parts"`
+}
+
 type geminiRequest struct {
-	Contents []geminiContent `json:"contents"`
+	SystemInstruction *geminiSystemInstruction `json:"system_instruction,omitempty"`
+	Contents          []geminiContent          `json:"contents"`
 }
 
 type geminiContent struct {
@@ -343,18 +372,18 @@ type geminiResponse struct {
 // geminiModels is the ordered fallback list of models to try.
 // The first model that returns a non-empty response wins.
 var geminiModels = []string{
+	"gemini-2.5-flash",
+	"gemini-2.5-pro",
 	"gemini-2.0-flash",
 	"gemini-2.0-flash-lite",
 	"gemini-1.5-flash",
-	"gemini-2.5-flash-preview-04-17",
-	"gemini-2.5-pro-preview-03-25",
 }
 
 // callGeminiWithFallback tries each API key with every model in geminiModels.
 // It only returns ErrGeminiRateLimit if ALL combinations were rate-limited.
 // Any other error type is treated as a transient failure and the next
 // key/model pair is tried.
-func callGeminiWithFallback(apiKeys []string, systemPrompt string, history []HistoryTurn, userMessage string) (string, error) {
+func callGeminiWithFallback(apiKeys []string, systemPrompt string, history []HistoryTurn, userMessage string) (string, string, error) {
 	var lastErr error
 	allRateLimited := true
 
@@ -362,7 +391,7 @@ func callGeminiWithFallback(apiKeys []string, systemPrompt string, history []His
 		for _, model := range geminiModels {
 			text, err := callGemini(apiKey, model, systemPrompt, history, userMessage)
 			if err == nil {
-				return text, nil
+				return text, model, nil
 			}
 			if !errors.Is(err, ErrGeminiRateLimit) {
 				allRateLimited = false
@@ -373,9 +402,9 @@ func callGeminiWithFallback(apiKeys []string, systemPrompt string, history []His
 
 	// Surface a clear rate-limit sentinel only when every attempt was a 429.
 	if allRateLimited {
-		return "", ErrGeminiRateLimit
+		return "", "", ErrGeminiRateLimit
 	}
-	return "", fmt.Errorf("all Gemini key/model combinations failed; last error: %w", lastErr)
+	return "", "", fmt.Errorf("all Gemini key/model combinations failed; last error: %w", lastErr)
 }
 
 // ---- Groq HTTP client (OpenAI-compatible) -------------------------------
@@ -410,14 +439,14 @@ type groqResponse struct {
 
 // callGroqWithFallback tries every model in groqModels with the single Groq key.
 // Returns ErrGeminiRateLimit (reused sentinel) when the Groq key itself is rate-limited.
-func callGroqWithFallback(apiKey string, systemPrompt string, history []HistoryTurn, userMessage string) (string, error) {
+func callGroqWithFallback(apiKey string, systemPrompt string, history []HistoryTurn, userMessage string) (string, string, error) {
 	var lastErr error
 	allRateLimited := true
 
 	for _, model := range groqModels {
 		text, err := callGroq(apiKey, model, systemPrompt, history, userMessage)
 		if err == nil {
-			return text, nil
+			return text, model, nil
 		}
 		if !errors.Is(err, ErrGeminiRateLimit) {
 			allRateLimited = false
@@ -426,9 +455,9 @@ func callGroqWithFallback(apiKey string, systemPrompt string, history []HistoryT
 	}
 
 	if allRateLimited {
-		return "", ErrGeminiRateLimit
+		return "", "", ErrGeminiRateLimit
 	}
-	return "", fmt.Errorf("all Groq models failed; last error: %w", lastErr)
+	return "", "", fmt.Errorf("all Groq models failed; last error: %w", lastErr)
 }
 
 // callGroq makes a single request to the Groq chat-completions endpoint.
@@ -502,12 +531,6 @@ func callGroq(apiKey, model, systemPrompt string, history []HistoryTurn, userMes
 func callGemini(apiKey, model, systemPrompt string, history []HistoryTurn, userMessage string) (string, error) {
 	var contents []geminiContent
 
-	// System instruction as the first model turn
-	contents = append(contents, geminiContent{
-		Role:  "model",
-		Parts: []geminiPart{{Text: systemPrompt}},
-	})
-
 	// Conversation history (capped at 10 turns)
 	start := 0
 	if len(history) > 10 {
@@ -530,7 +553,8 @@ func callGemini(apiKey, model, systemPrompt string, history []HistoryTurn, userM
 		Parts: []geminiPart{{Text: userMessage}},
 	})
 
-	payload, err := json.Marshal(geminiRequest{Contents: contents})
+	sysInstr := &geminiSystemInstruction{Parts: []geminiPart{{Text: systemPrompt}}}
+	payload, err := json.Marshal(geminiRequest{SystemInstruction: sysInstr, Contents: contents})
 	if err != nil {
 		return "", err
 	}

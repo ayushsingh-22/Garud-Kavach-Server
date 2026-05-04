@@ -66,17 +66,17 @@ func SignUpHandler(w http.ResponseWriter, r *http.Request) {
 
 // signupCustomer creates a customer account. Behaviour is identical to RegisterCustomerHandler.
 func signupCustomer(w http.ResponseWriter, req SignUpRequest) {
-	name := strings.TrimSpace(req.Name)
-	email := strings.TrimSpace(strings.ToLower(req.Email))
-	password := req.Password
-
-	if name == "" {
+	name, err := helpers.ValidateTrimLength(req.Name, 200)
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Name is required"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Name is required and must not exceed 200 characters"})
 		return
 	}
 
-	if !emailRegex.MatchString(email) {
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	password := req.Password
+
+	if !helpers.ValidateEmail(email) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid email format"})
 		return
@@ -89,7 +89,7 @@ func signupCustomer(w http.ResponseWriter, req SignUpRequest) {
 	}
 
 	var exists bool
-	err := db.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)", email).Scan(&exists)
+	err = db.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)", email).Scan(&exists)
 	if err != nil {
 		log.Printf("ERROR: Database error checking email existence: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -167,22 +167,22 @@ func signupAdmin(w http.ResponseWriter, r *http.Request, req SignUpRequest) {
 	}
 
 	adminRole := strings.TrimSpace(strings.ToLower(req.AdminRole))
-	if adminRole != "manager" && adminRole != "finance" && adminRole != "hr" {
+	if !helpers.ValidateStatus(adminRole, []string{"manager", "finance", "hr"}) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid adminRole. Must be 'manager', 'finance', or 'hr'."})
 		return
 	}
 
-	name := strings.TrimSpace(req.Name)
-	email := strings.TrimSpace(strings.ToLower(req.Email))
-
-	if name == "" {
+	name, nameErr := helpers.ValidateTrimLength(req.Name, 200)
+	if nameErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Name is required"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Name is required and must not exceed 200 characters"})
 		return
 	}
 
-	if !emailRegex.MatchString(email) {
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+
+	if !helpers.ValidateEmail(email) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid email format"})
 		return
@@ -278,8 +278,27 @@ func CreateAdminUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validation
-	if req.Role != "manager" && req.Role != "finance" && req.Role != "hr" {
+	if !helpers.ValidateStatus(req.Role, []string{"manager", "finance", "hr"}) {
 		http.Error(w, `{"error":"Invalid role specified. Must be manager, finance, or hr."}`, http.StatusBadRequest)
+		return
+	}
+
+	name, nameErr := helpers.ValidateTrimLength(req.Name, 200)
+	if nameErr != nil {
+		http.Error(w, `{"error":"Name is required and must not exceed 200 characters"}`, http.StatusBadRequest)
+		return
+	}
+	req.Name = name
+
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	if !helpers.ValidateEmail(email) {
+		http.Error(w, `{"error":"Invalid email format"}`, http.StatusBadRequest)
+		return
+	}
+	req.Email = email
+
+	if len(req.Password) < 8 {
+		http.Error(w, `{"error":"Password must be at least 8 characters"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -326,8 +345,27 @@ func UpdateAdminUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validation
-	if req.Role != "manager" && req.Role != "finance" && req.Role != "hr" && req.Role != "superadmin" {
+	if !helpers.ValidateStatus(req.Role, []string{"manager", "finance", "hr", "superadmin"}) {
 		http.Error(w, `{"error":"Invalid role specified."}`, http.StatusBadRequest)
+		return
+	}
+
+	name, nameErr := helpers.ValidateTrimLength(req.Name, 200)
+	if nameErr != nil {
+		http.Error(w, `{"error":"Name is required and must not exceed 200 characters"}`, http.StatusBadRequest)
+		return
+	}
+	req.Name = name
+
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	if !helpers.ValidateEmail(email) {
+		http.Error(w, `{"error":"Invalid email format"}`, http.StatusBadRequest)
+		return
+	}
+	req.Email = email
+
+	if req.Password != "" && len(req.Password) < 8 {
+		http.Error(w, `{"error":"Password must be at least 8 characters"}`, http.StatusBadRequest)
 		return
 	}
 

@@ -60,6 +60,29 @@ func AddQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate required fields at the boundary
+	name, err := helpers.ValidateTrimLength(newQuery.Name, 200)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Name is required and must not exceed 200 characters"})
+		return
+	}
+	newQuery.Name = name
+
+	if email := strings.TrimSpace(newQuery.Email); email != "" && !helpers.ValidateEmail(email) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid email format"})
+		return
+	}
+
+	if service, err2 := helpers.ValidateTrimLength(newQuery.Service, 200); err2 != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Service type is required"})
+		return
+	} else {
+		newQuery.Service = service
+	}
+
 	newQuery.SubmittedAt = time.Now().UTC().Format(time.RFC3339)
 	if newQuery.Status == "" {
 		newQuery.Status = "Pending"
