@@ -85,6 +85,7 @@ func main() {
 	financeRouter.Use(handlers.RequireRole("superadmin", "finance"))
 	financeRouter.HandleFunc("/invoices", handlers.GetInvoices).Methods("GET")
 	financeRouter.HandleFunc("/reports", handlers.GetFinanceReports).Methods("GET")
+	financeRouter.HandleFunc("/overview", handlers.GetFinanceOverview).Methods("GET")
 	financeRouter.HandleFunc("/expenses", handlers.CreateExpense).Methods("POST")
 	financeRouter.HandleFunc("/expenses", handlers.GetExpenses).Methods("GET")
 	financeRouter.HandleFunc("/invoices/{id:[0-9]+}", handlers.UpdateInvoiceStatus).Methods("PUT")
@@ -135,15 +136,10 @@ func main() {
 	// ─────────────────────────────────────────────────────────────────────────────
 
 	c := cors.New(cors.Options{
-		AllowedOrigins: []string{
-			"https://rakshak-service.vercel.app",
-			"https://rakshak-service-ayushsingh-22s-projects.vercel.app",
-			"https://rakshak-service-git-main-ayushsingh-22s-projects.vercel.app",
-			"http://localhost:3000",
-			"http://localhost:5174",     // Guard PWA dev server
-			"http://192.168.31.66:3000", // LAN dev (mobile testing)
-			"http://192.168.31.66:5174", // Guard PWA LAN
-		},
+		// Dynamic origin validation — no hardcoded IPs or ports.
+		// Allows: localhost, any private-network IP (LAN dev), and the
+		// production domain(s) listed in the FRONTEND_URL env var.
+		AllowOriginFunc:  handlers.IsAllowedOrigin,
 		AllowCredentials: true,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "X-Guard-Token"},

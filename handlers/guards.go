@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -131,28 +132,64 @@ func writeValidationError(w http.ResponseWriter, err error) bool {
 
 func uploadGuardPhoto(file multipart.File, header *multipart.FileHeader) (*string, error) {
 	mimeType := header.Header.Get("Content-Type")
-	if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
-		return nil, errBadRequest("Invalid image format")
+
+	// Normalize non-standard type sent by some clients
+	if mimeType == "image/jpg" {
+		mimeType = "image/jpeg"
+	}
+
+	// If Content-Type is missing or generic (e.g. application/octet-stream), sniff
+	// from the first 512 bytes — this handles iOS HEIC→JPEG output from
+	// browser-image-compression which can strip the MIME type.
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		buf := make([]byte, 512)
+		n, _ := file.Read(buf)
+		mimeType = http.DetectContentType(buf[:n])
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("photo: failed to seek after MIME sniff: %w", err)
+		}
+		log.Printf("uploadGuardPhoto: sniffed MIME type = %q (header was empty/octet-stream)", mimeType)
+	}
+
+	if !strings.HasPrefix(mimeType, "image/") {
+		return nil, errBadRequest(fmt.Sprintf("invalid image format (detected: %s)", mimeType))
 	}
 	if header.Size > maxGuardPhotoSize {
-		return nil, errBadRequest("File size exceeds 5MB")
+		return nil, errBadRequest("file size exceeds 5 MB")
 	}
 
 	cloudinaryURL := strings.TrimSpace(os.Getenv("CLOUDINARY_URL"))
 	if cloudinaryURL == "" {
-		return nil, errBadRequest("Photo upload is not configured")
+		return nil, fmt.Errorf("photo upload not configured: CLOUDINARY_URL env var is unset")
 	}
 
 	cld, err := cloudinary.NewFromURL(cloudinaryURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cloudinary URL parse error: %w", err)
 	}
 	resp, err := cld.Upload.Upload(context.Background(), file, uploader.UploadParams{Folder: "guards"})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cloudinary upload failed: %w", err)
 	}
 
-	return &resp.SecureURL, nil
+	// The Cloudinary SDK does NOT surface API-level errors as Go errors.
+	// Check the embedded Error field explicitly.
+	if resp.Error.Message != "" {
+		return nil, fmt.Errorf("cloudinary API error: %s", resp.Error.Message)
+	}
+
+	// Prefer HTTPS URL; fall back to HTTP if SecureURL is somehow empty.
+	url := resp.SecureURL
+	if url == "" {
+		url = resp.URL
+	}
+	if url == "" {
+		log.Printf("uploadGuardPhoto: Cloudinary returned empty URL — PublicID=%q Format=%q Bytes=%d",
+			resp.PublicID, resp.Format, resp.Bytes)
+		return nil, fmt.Errorf("cloudinary returned an empty URL (PublicID=%q)", resp.PublicID)
+	}
+
+	return &url, nil
 }
 
 // GetGuards retrieves all non-deleted guards.

@@ -247,6 +247,204 @@ func UpdateInvoiceStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Invoice updated successfully"})
 }
 
+// GetFinanceOverview returns a comprehensive finance summary for the superadmin dashboard:
+// - current month P&L
+// - last 6 months revenue/expense trend
+// - 15 most recent transactions (invoices + expenses combined)
+// - expense breakdown by category
+// - outstanding (unpaid) invoice total
+func GetFinanceOverview(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+
+	// ── Read filter query params ────────────────────────────────────────
+	qMonth := r.URL.Query().Get("month") // YYYY-MM, defaults to current
+	if qMonth == "" {
+		qMonth = now.Format("2006-01")
+	}
+	// Validate month format
+	refDate, parseErr := time.Parse("2006-01", qMonth)
+	if parseErr != nil {
+		qMonth = now.Format("2006-01")
+		refDate = now
+	}
+
+	trendMonths := 6
+	if tm := r.URL.Query().Get("trend_months"); tm != "" {
+		if v, e := strconv.Atoi(tm); e == nil && (v == 3 || v == 6 || v == 12) {
+			trendMonths = v
+		}
+	}
+
+	txnType := strings.ToLower(r.URL.Query().Get("txn_type"))     // all | invoice | expense
+	txnStatus := strings.ToLower(r.URL.Query().Get("txn_status")) // all | paid | pending
+	if txnType == "" {
+		txnType = "all"
+	}
+	if txnStatus == "" {
+		txnStatus = "all"
+	}
+
+	catScope := strings.ToLower(r.URL.Query().Get("cat_scope")) // all | month
+	if catScope == "" {
+		catScope = "all"
+	}
+
+	// ── Current month P&L ───────────────────────────────────────────────
+	var revenue, expenseTotal float64
+	_ = db.DB.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status='paid' AND TO_CHAR(paid_at,'YYYY-MM')=$1 AND deleted_at IS NULL`, qMonth).Scan(&revenue)
+	_ = db.DB.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM expenses WHERE TO_CHAR(expense_date,'YYYY-MM')=$1 AND deleted_at IS NULL`, qMonth).Scan(&expenseTotal)
+
+	// ── Trend (variable months) ─────────────────────────────────────────
+	type MonthTrend struct {
+		Month    string  `json:"month"`
+		Revenue  float64 `json:"revenue"`
+		Expenses float64 `json:"expenses"`
+		Profit   float64 `json:"profit"`
+	}
+	trends := make([]MonthTrend, trendMonths)
+	for i := trendMonths - 1; i >= 0; i-- {
+		d := refDate.AddDate(0, -i, 0)
+		m := d.Format("2006-01")
+		label := d.Format("Jan 06")
+		var rev, exp float64
+		_ = db.DB.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status='paid' AND TO_CHAR(paid_at,'YYYY-MM')=$1 AND deleted_at IS NULL`, m).Scan(&rev)
+		_ = db.DB.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM expenses WHERE TO_CHAR(expense_date,'YYYY-MM')=$1 AND deleted_at IS NULL`, m).Scan(&exp)
+		trends[trendMonths-1-i] = MonthTrend{Month: label, Revenue: rev, Expenses: exp, Profit: rev - exp}
+	}
+
+	// ── Recent transactions (last 15) with type & status filters ────────
+	type Transaction struct {
+		ID          int     `json:"id"`
+		Type        string  `json:"type"`
+		Description string  `json:"description"`
+		Amount      float64 `json:"amount"`
+		Status      string  `json:"status"`
+		Date        string  `json:"date"`
+		Category    string  `json:"category"`
+	}
+	var transactions []Transaction
+
+	if txnType == "all" || txnType == "invoice" {
+		invQuery := `
+			SELECT i.id, COALESCE(q.name,'N/A'), i.amount, i.status,
+			       TO_CHAR(i.issued_at,'YYYY-MM-DD'), COALESCE(q.service,'')
+			FROM invoices i LEFT JOIN queries q ON i.query_id=q.id
+			WHERE i.deleted_at IS NULL`
+		var invArgs []interface{}
+		argIdx := 1
+		if txnStatus == "paid" || txnStatus == "pending" {
+			invQuery += ` AND i.status=$` + strconv.Itoa(argIdx)
+			invArgs = append(invArgs, txnStatus)
+			argIdx++
+		}
+		_ = argIdx
+		invQuery += ` ORDER BY i.issued_at DESC LIMIT 15`
+		invRows, err := db.DB.Query(invQuery, invArgs...)
+		if err == nil {
+			defer invRows.Close()
+			for invRows.Next() {
+				var t Transaction
+				var desc, cat string
+				invRows.Scan(&t.ID, &desc, &t.Amount, &t.Status, &t.Date, &cat)
+				t.Type = "invoice"
+				t.Description = desc
+				t.Category = cat
+				transactions = append(transactions, t)
+			}
+		}
+	}
+
+	if txnType == "all" || txnType == "expense" {
+		// expenses don't have a real status but if status filter is "pending", skip expenses
+		if txnStatus != "pending" {
+			expRows, err := db.DB.Query(`
+				SELECT id, COALESCE(description,''), amount, 'expense',
+				       TO_CHAR(expense_date,'YYYY-MM-DD'), COALESCE(category,'Uncategorized')
+				FROM expenses WHERE deleted_at IS NULL ORDER BY expense_date DESC LIMIT 15`)
+			if err == nil {
+				defer expRows.Close()
+				for expRows.Next() {
+					var t Transaction
+					expRows.Scan(&t.ID, &t.Description, &t.Amount, &t.Status, &t.Date, &t.Category)
+					t.Type = "expense"
+					t.Status = "paid"
+					transactions = append(transactions, t)
+				}
+			}
+		}
+	}
+
+	// Sort combined by date desc and take top 15
+	for i := 0; i < len(transactions); i++ {
+		for j := i + 1; j < len(transactions); j++ {
+			if transactions[j].Date > transactions[i].Date {
+				transactions[i], transactions[j] = transactions[j], transactions[i]
+			}
+		}
+	}
+	if len(transactions) > 15 {
+		transactions = transactions[:15]
+	}
+
+	// ── Expense category breakdown (scoped) ─────────────────────────────
+	type CategoryBreakdown struct {
+		Category string  `json:"category"`
+		Amount   float64 `json:"amount"`
+	}
+	var categories []CategoryBreakdown
+
+	catQuery := `SELECT COALESCE(category,'Uncategorized'), SUM(amount) FROM expenses WHERE deleted_at IS NULL`
+	var catArgs []interface{}
+	if catScope == "month" {
+		catQuery += ` AND TO_CHAR(expense_date,'YYYY-MM')=$1`
+		catArgs = append(catArgs, qMonth)
+	}
+	catQuery += ` GROUP BY COALESCE(category,'Uncategorized') ORDER BY SUM(amount) DESC`
+	catRows, err := db.DB.Query(catQuery, catArgs...)
+	if err == nil {
+		defer catRows.Close()
+		for catRows.Next() {
+			var cb CategoryBreakdown
+			catRows.Scan(&cb.Category, &cb.Amount)
+			categories = append(categories, cb)
+		}
+	}
+	if categories == nil {
+		categories = []CategoryBreakdown{}
+	}
+
+	// ── Outstanding invoices ────────────────────────────────────────────
+	var outstandingAmount float64
+	var outstandingCount int
+	_ = db.DB.QueryRow(`SELECT COALESCE(SUM(amount),0), COUNT(*) FROM invoices WHERE status='pending' AND deleted_at IS NULL`).Scan(&outstandingAmount, &outstandingCount)
+
+	// ── Total collected (all time) ──────────────────────────────────────
+	var totalCollected float64
+	_ = db.DB.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status='paid' AND deleted_at IS NULL`).Scan(&totalCollected)
+
+	if transactions == nil {
+		transactions = []Transaction{}
+	}
+
+	result := map[string]interface{}{
+		"current_month":       qMonth,
+		"revenue":             revenue,
+		"expenses":            expenseTotal,
+		"profit":              revenue - expenseTotal,
+		"trends":              trends,
+		"trend_months":        trendMonths,
+		"recent_transactions": transactions,
+		"category_breakdown":  categories,
+		"cat_scope":           catScope,
+		"outstanding_amount":  outstandingAmount,
+		"outstanding_count":   outstandingCount,
+		"total_collected":     totalCollected,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 // GetExpenses gets all non-deleted expenses
 func GetExpenses(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.DB.Query(`

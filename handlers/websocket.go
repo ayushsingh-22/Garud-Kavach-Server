@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,18 +23,55 @@ import (
 
 // ─── Upgrader ──────────────────────────────────────────────────────────────────
 
+// IsAllowedOrigin returns true for:
+//  1. Any localhost / 127.x.x.x origin (dev)
+//  2. Any private-network IP (10.x, 172.16-31.x, 192.168.x)
+//  3. The production frontend URL(s) from the FRONTEND_URL env var (comma-separated)
+//  4. Empty origin header (non-browser clients, curl, etc.)
+func IsAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+
+	// localhost always allowed
+	if host == "localhost" || host == "127.0.0.1" {
+		return true
+	}
+
+	// Private-network CIDRs
+	ip := net.ParseIP(host)
+	if ip != nil {
+		private := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+		for _, cidr := range private {
+			_, network, _ := net.ParseCIDR(cidr)
+			if network.Contains(ip) {
+				return true
+			}
+		}
+	}
+
+	// Production domain from env
+	if prod := os.Getenv("FRONTEND_URL"); prod != "" {
+		for _, allowed := range strings.Split(prod, ",") {
+			if strings.EqualFold(strings.TrimSpace(allowed), origin) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 var wsUpgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Allow connections from frontend origins
 	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		allowed := map[string]bool{
-			"http://localhost:3000":              true,
-			"http://localhost:5174":              true, // Guard PWA dev port
-			"https://rakshak-service.vercel.app": true,
-		}
-		return allowed[origin]
+		return IsAllowedOrigin(r.Header.Get("Origin"))
 	},
 }
 
@@ -108,28 +149,39 @@ func (h *Hub) broadcastToAdmins(msg OutgoingMsg) {
 
 // ServeGuardWS handles guard app WebSocket connections.
 // URL: GET /ws/guard?token={guard_token}
+//
+// IMPORTANT: we upgrade to WS *before* validating the token so that auth
+// failures are delivered as a clean WS close frame (code 4001) rather than
+// an HTTP 4xx response. An HTTP error on a WS upgrade causes an ECONNRESET
+// at every proxy/browser layer, which generates noisy errors and triggers
+// an infinite reconnect loop on the client.
 func ServeGuardWS(w http.ResponseWriter, r *http.Request) {
+	// Upgrade first — any HTTP error response causes ECONNRESET at the proxy.
+	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[ws] guard upgrade error: %v", err)
+		return
+	}
+
 	token := r.URL.Query().Get("token")
 	if token == "" {
-		http.Error(w, "missing token", http.StatusUnauthorized)
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4001, "missing token"))
+		conn.Close()
 		return
 	}
 
 	// Validate token and fetch guard info
 	var guardID int
 	var guardName string
-	err := db.DB.QueryRow(
+	err = db.DB.QueryRow(
 		`SELECT id, name FROM guards WHERE guard_token = $1 AND deleted_at IS NULL`,
 		token,
 	).Scan(&guardID, &guardName)
 	if err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[ws] guard upgrade error: %v", err)
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4001, "invalid token"))
+		conn.Close()
 		return
 	}
 
@@ -371,20 +423,25 @@ func (c *GuardClient) handleSOS(msg IncomingMsg) {
 // ServeAdminWS handles admin/manager WebSocket connections.
 // URL: GET /ws/admin  (requires JWT cookie with superadmin/manager role)
 func ServeAdminWS(w http.ResponseWriter, r *http.Request) {
+	// Upgrade first to avoid ECONNRESET at the proxy on auth failure.
+	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[ws] admin upgrade error: %v", err)
+		return
+	}
+
 	claims, err := parseTokenClaimsFromRequest(r)
 	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4001, "unauthorized"))
+		conn.Close()
 		return
 	}
 	role, _ := claims["role"].(string)
 	if role != "superadmin" && role != "manager" {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[ws] admin upgrade error: %v", err)
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4003, "forbidden"))
+		conn.Close()
 		return
 	}
 
@@ -549,6 +606,7 @@ func GetIncidents(w http.ResponseWriter, r *http.Request) {
 	type Incident struct {
 		ID          int      `json:"id"`
 		GuardID     *int     `json:"guardId"`
+		GuardName   *string  `json:"guardName"`
 		Title       string   `json:"title"`
 		Description *string  `json:"description"`
 		PhotoURL    *string  `json:"photoUrl"`
@@ -560,17 +618,17 @@ func GetIncidents(w http.ResponseWriter, r *http.Request) {
 
 	incidents := make([]Incident, 0)
 
-	const baseQ = `SELECT id, guard_id, title, description, photo_url, severity, lat, lng, created_at
-	               FROM incidents WHERE deleted_at IS NULL`
+	const baseQ = `SELECT i.id, i.guard_id, g.name, i.title, i.description, i.photo_url, i.severity, i.lat, i.lng, i.created_at
+	               FROM incidents i LEFT JOIN guards g ON i.guard_id = g.id WHERE i.deleted_at IS NULL`
 
 	var (
 		rows *sql.Rows
 		err  error
 	)
 	if guardID != "" {
-		rows, err = db.DB.Query(baseQ+` AND guard_id=$1 ORDER BY created_at DESC LIMIT 100`, guardID)
+		rows, err = db.DB.Query(baseQ+` AND i.guard_id=$1 ORDER BY i.created_at DESC LIMIT 100`, guardID)
 	} else {
-		rows, err = db.DB.Query(baseQ + ` ORDER BY created_at DESC LIMIT 100`)
+		rows, err = db.DB.Query(baseQ + ` ORDER BY i.created_at DESC LIMIT 100`)
 	}
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -579,7 +637,7 @@ func GetIncidents(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	for rows.Next() {
 		var inc Incident
-		if err := rows.Scan(&inc.ID, &inc.GuardID, &inc.Title, &inc.Description, &inc.PhotoURL, &inc.Severity, &inc.Lat, &inc.Lng, &inc.CreatedAt); err != nil {
+		if err := rows.Scan(&inc.ID, &inc.GuardID, &inc.GuardName, &inc.Title, &inc.Description, &inc.PhotoURL, &inc.Severity, &inc.Lat, &inc.Lng, &inc.CreatedAt); err != nil {
 			continue
 		}
 		incidents = append(incidents, inc)
@@ -644,10 +702,11 @@ func GuardCreateIncident(w http.ResponseWriter, r *http.Request) {
 		defer file.Close()
 		url, uploadErr := uploadGuardPhoto(file, header)
 		if uploadErr != nil {
-			log.Printf("GuardCreateIncident photo upload warning: %v", uploadErr)
+			log.Printf("GuardCreateIncident photo upload failed (incident will be saved without photo): %v", uploadErr)
 			// Non-fatal — continue without photo
 		} else {
 			photoURL = url
+			log.Printf("GuardCreateIncident photo uploaded: %s", *url)
 		}
 	}
 
