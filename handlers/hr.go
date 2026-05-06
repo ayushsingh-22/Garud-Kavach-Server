@@ -13,26 +13,50 @@ import (
 )
 
 type Shift struct {
-	ID          int        `json:"id"`
-	GuardID     int        `json:"guard_id"`
-	GuardName   *string    `json:"guard_name"`
-	QueryID     int        `json:"query_id"`
-	ClientName  *string    `json:"client_name"`
-	StartTime   *time.Time `json:"start_time"`
-	EndTime     *time.Time `json:"end_time"`
-	ActualHours float64    `json:"actual_hours"`
-	Status      string     `json:"status"`
+	ID            int        `json:"id"`
+	GuardID       int        `json:"guard_id"`
+	GuardName     *string    `json:"guard_name"`
+	QueryID       *int       `json:"query_id"`
+	ClientName    *string    `json:"client_name"`
+	StartTime     *time.Time `json:"start_time"`
+	EndTime       *time.Time `json:"end_time"`
+	ActualHours   float64    `json:"actual_hours"`
+	OvertimeHours float64    `json:"overtime_hours"`
+	PaidHours     float64    `json:"paid_hours"`
+	Status        string     `json:"status"`
+}
+
+// computeOvertimeAndPaid returns (overtimeHours, paidHours) for a given actualHours.
+// Business rules (hard cap at 10 h):
+//   - actual ≤  8 h → overtime = 0,                  paid = actual
+//   - actual ≤ 10 h → overtime = 2 × (actual − 8),   paid = actual
+//   - actual > 10 h → capped to 10 h
+//
+// total_pay = (paid_hours + overtime_hours) * rate
+//
+//	e.g. 10 h worked → paid=10, ot=4 → billable=14 → salary = 14 × rate
+func computeOvertimeAndPaid(actualHours float64) (overtimeHours, paidHours float64) {
+	if actualHours > 10 {
+		actualHours = 10
+	}
+	if actualHours <= 8 {
+		return 0, actualHours
+	}
+	ot := (actualHours - 8) * 2 // 2× multiplier on overtime hours
+	return ot, actualHours      // paid_hours = actual (≤10); OT added separately in pay calc
 }
 
 type PayrollRecord struct {
-	GuardID     int     `json:"guard_id"`
-	GuardName   *string `json:"guard_name"`
-	Month       string  `json:"month"`
-	TotalHours  float64 `json:"total_hours"`
-	RatePerHour float64 `json:"rate_per_hour"`
-	TotalPay    float64 `json:"total_pay"`
-	Status      string  `json:"status"`
-	ID          *int    `json:"id"`
+	GuardID       int     `json:"guard_id"`
+	GuardName     *string `json:"guard_name"`
+	Month         string  `json:"month"`
+	TotalHours    float64 `json:"total_hours"`
+	OvertimeHours float64 `json:"overtime_hours"`
+	PaidHours     float64 `json:"paid_hours"`
+	RatePerHour   float64 `json:"rate_per_hour"`
+	TotalPay      float64 `json:"total_pay"`
+	Status        string  `json:"status"`
+	ID            *int    `json:"id"`
 }
 
 type LeaveRequest struct {
@@ -52,7 +76,10 @@ func GetShifts(w http.ResponseWriter, r *http.Request) {
 	monthFilter := r.URL.Query().Get("month") // YYYY-MM
 
 	query := `
-		SELECT s.id, s.guard_id, g.name AS guard_name, s.query_id, q.name AS client_name, s.start_time, s.end_time, COALESCE(s.actual_hours, 0), s.status
+		SELECT s.id, s.guard_id, g.name AS guard_name, s.query_id, q.name AS client_name,
+		       s.start_time, s.end_time,
+		       COALESCE(s.actual_hours, 0), COALESCE(s.overtime_hours, 0), COALESCE(s.paid_hours, 0),
+		       s.status
 		FROM shifts s
 		LEFT JOIN guards g ON s.guard_id = g.id
 		LEFT JOIN queries q ON s.query_id = q.id
@@ -85,7 +112,7 @@ func GetShifts(w http.ResponseWriter, r *http.Request) {
 	var shifts []Shift
 	for rows.Next() {
 		var s Shift
-		if err := rows.Scan(&s.ID, &s.GuardID, &s.GuardName, &s.QueryID, &s.ClientName, &s.StartTime, &s.EndTime, &s.ActualHours, &s.Status); err != nil {
+		if err := rows.Scan(&s.ID, &s.GuardID, &s.GuardName, &s.QueryID, &s.ClientName, &s.StartTime, &s.EndTime, &s.ActualHours, &s.OvertimeHours, &s.PaidHours, &s.Status); err != nil {
 			http.Error(w, `{"error":"Failed to scan shift data"}`, http.StatusInternalServerError)
 			return
 		}
@@ -110,7 +137,7 @@ func CreateShift(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Valid guard_id is required"}`, http.StatusBadRequest)
 		return
 	}
-	if req.QueryID <= 0 {
+	if req.QueryID == nil || *req.QueryID <= 0 {
 		http.Error(w, `{"error":"Valid query_id is required"}`, http.StatusBadRequest)
 		return
 	}
@@ -120,6 +147,10 @@ func CreateShift(w http.ResponseWriter, r *http.Request) {
 	}
 	if !req.EndTime.After(*req.StartTime) {
 		http.Error(w, `{"error":"end_time must be after start_time"}`, http.StatusBadRequest)
+		return
+	}
+	if req.EndTime.Sub(*req.StartTime) > 10*time.Hour {
+		http.Error(w, `{"error":"Shift duration cannot exceed 10 hours"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -166,16 +197,29 @@ func UpdateShift(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Actual hours cannot be negative"}`, http.StatusBadRequest)
 		return
 	}
-	if req.StartTime != nil && req.EndTime != nil && !req.EndTime.After(*req.StartTime) {
-		http.Error(w, `{"error":"end_time must be after start_time"}`, http.StatusBadRequest)
+	if req.ActualHours > 10 {
+		http.Error(w, `{"error":"Shift cannot exceed 10 hours"}`, http.StatusBadRequest)
 		return
 	}
+	if req.StartTime != nil && req.EndTime != nil {
+		if !req.EndTime.After(*req.StartTime) {
+			http.Error(w, `{"error":"end_time must be after start_time"}`, http.StatusBadRequest)
+			return
+		}
+		if req.EndTime.Sub(*req.StartTime) > 10*time.Hour {
+			http.Error(w, `{"error":"Shift duration cannot exceed 10 hours"}`, http.StatusBadRequest)
+			return
+		}
+	}
+
+	req.OvertimeHours, req.PaidHours = computeOvertimeAndPaid(req.ActualHours)
 
 	result, err := db.DB.Exec(`
-		UPDATE shifts 
-		SET start_time = $1, end_time = $2, actual_hours = $3, status = $4
-		WHERE id = $5 AND deleted_at IS NULL
-	`, req.StartTime, req.EndTime, req.ActualHours, req.Status, id)
+		UPDATE shifts
+		SET start_time = $1, end_time = $2, actual_hours = $3,
+		    overtime_hours = $4, paid_hours = $5, status = $6
+		WHERE id = $7 AND deleted_at IS NULL
+	`, req.StartTime, req.EndTime, req.ActualHours, req.OvertimeHours, req.PaidHours, req.Status, id)
 
 	if err != nil {
 		http.Error(w, `{"error":"Failed to update shift"}`, http.StatusInternalServerError)
@@ -206,7 +250,9 @@ func GetPayroll(w http.ResponseWriter, r *http.Request) {
 
 	// Try to get from payroll table first
 	query := `
-		SELECT p.id, p.guard_id, g.name, TO_CHAR(p.month, 'YYYY-MM'), p.total_hours, p.rate_per_hour, p.total_pay, p.status
+		SELECT p.id, p.guard_id, g.name, TO_CHAR(p.month, 'YYYY-MM'),
+		       p.total_hours, COALESCE(p.overtime_hours,0), COALESCE(p.paid_hours,0),
+		       p.rate_per_hour, p.total_pay, p.status
 		FROM payroll p
 		LEFT JOIN guards g ON p.guard_id = g.id
 		WHERE TO_CHAR(p.month, 'YYYY-MM') = $1 AND p.deleted_at IS NULL
@@ -221,7 +267,7 @@ func GetPayroll(w http.ResponseWriter, r *http.Request) {
 	var payroll []PayrollRecord
 	for rows.Next() {
 		var p PayrollRecord
-		if err := rows.Scan(&p.ID, &p.GuardID, &p.GuardName, &p.Month, &p.TotalHours, &p.RatePerHour, &p.TotalPay, &p.Status); err != nil {
+		if err := rows.Scan(&p.ID, &p.GuardID, &p.GuardName, &p.Month, &p.TotalHours, &p.OvertimeHours, &p.PaidHours, &p.RatePerHour, &p.TotalPay, &p.Status); err != nil {
 			http.Error(w, `{"error":"Failed to scan payroll data"}`, http.StatusInternalServerError)
 			return
 		}
@@ -231,10 +277,14 @@ func GetPayroll(w http.ResponseWriter, r *http.Request) {
 	// If no payroll records for month, calculate from shifts
 	if len(payroll) == 0 {
 		calcQuery := `
-			SELECT s.guard_id, g.name, SUM(COALESCE(s.actual_hours, 0)), g.hourly_rate
+			SELECT s.guard_id, g.name,
+			       SUM(COALESCE(s.actual_hours, 0)),
+			       SUM(COALESCE(s.overtime_hours, 0)),
+			       SUM(COALESCE(s.paid_hours, COALESCE(s.actual_hours, 0))),
+			       g.hourly_rate
 			FROM shifts s
 			LEFT JOIN guards g ON s.guard_id = g.id
-			WHERE DATE_TRUNC('month', s.start_time) = TO_DATE($1, 'YYYY-MM')
+			WHERE TO_CHAR(s.start_time, 'YYYY-MM') = $1
 			  AND s.deleted_at IS NULL
 			GROUP BY s.guard_id, g.name, g.hourly_rate
 		`
@@ -249,11 +299,11 @@ func GetPayroll(w http.ResponseWriter, r *http.Request) {
 			var p PayrollRecord
 			p.Month = monthFilter
 			p.Status = "pending"
-			if err := calcRows.Scan(&p.GuardID, &p.GuardName, &p.TotalHours, &p.RatePerHour); err != nil {
+			if err := calcRows.Scan(&p.GuardID, &p.GuardName, &p.TotalHours, &p.OvertimeHours, &p.PaidHours, &p.RatePerHour); err != nil {
 				http.Error(w, `{"error":"Failed to scan calculated payroll"}`, http.StatusInternalServerError)
 				return
 			}
-			p.TotalPay = p.TotalHours * p.RatePerHour
+			p.TotalPay = (p.PaidHours + p.OvertimeHours) * p.RatePerHour
 			payroll = append(payroll, p)
 		}
 	}
@@ -294,18 +344,28 @@ func FinalizePayroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate and insert
+	// total_pay = (paid_hours + overtime_hours) * rate
+	// paid_hours = actual_hours (capped at 10); overtime = 2×(actual-8) for shifts > 8h
 	query := `
-		INSERT INTO payroll (guard_id, month, total_hours, rate_per_hour, total_pay, status)
-		SELECT s.guard_id, $1, SUM(COALESCE(s.actual_hours, 0)), g.hourly_rate, SUM(COALESCE(s.actual_hours, 0)) * g.hourly_rate, 'pending'
+		INSERT INTO payroll (guard_id, month, total_hours, overtime_hours, paid_hours, rate_per_hour, total_pay, status)
+		SELECT
+		    s.guard_id,
+		    $1,
+		    SUM(COALESCE(s.actual_hours,   0)),
+		    SUM(COALESCE(s.overtime_hours, 0)),
+		    SUM(COALESCE(s.paid_hours,     COALESCE(s.actual_hours, 0))),
+		    g.hourly_rate,
+		    (SUM(COALESCE(s.paid_hours, COALESCE(s.actual_hours, 0))) + SUM(COALESCE(s.overtime_hours, 0))) * g.hourly_rate,
+		    'pending'
 		FROM shifts s
 		LEFT JOIN guards g ON s.guard_id = g.id
-		WHERE DATE_TRUNC('month', s.start_time) = $1
+		WHERE TO_CHAR(s.start_time, 'YYYY-MM') = $2
 		  AND s.deleted_at IS NULL
 		GROUP BY s.guard_id, g.hourly_rate
 	`
-	result, err := db.DB.Exec(query, monthDate)
+	result, err := db.DB.Exec(query, monthDate, monthFilter)
 	if err != nil {
+		log.Printf("ERROR FinalizePayroll: %v", err)
 		http.Error(w, `{"error":"Failed to finalize payroll"}`, http.StatusInternalServerError)
 		return
 	}

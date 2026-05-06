@@ -88,7 +88,12 @@ func main() {
 	financeRouter.HandleFunc("/overview", handlers.GetFinanceOverview).Methods("GET")
 	financeRouter.HandleFunc("/expenses", handlers.CreateExpense).Methods("POST")
 	financeRouter.HandleFunc("/expenses", handlers.GetExpenses).Methods("GET")
+	financeRouter.HandleFunc("/invoices/{id:[0-9]+}", handlers.GetInvoiceDetail).Methods("GET")
 	financeRouter.HandleFunc("/invoices/{id:[0-9]+}", handlers.UpdateInvoiceStatus).Methods("PUT")
+	financeRouter.HandleFunc("/expenses/{id:[0-9]+}", handlers.GetExpenseDetail).Methods("GET")
+	financeRouter.HandleFunc("/payroll", handlers.GetPayrollForFinance).Methods("GET")
+	financeRouter.HandleFunc("/payroll/{id:[0-9]+}", handlers.GetPayrollDetail).Methods("GET")
+	financeRouter.HandleFunc("/payroll/{id:[0-9]+}", handlers.UpdatePayrollStatus).Methods("PUT")
 
 	// -- HR Routes
 	hrRouter := s.PathPrefix("/hr").Subrouter()
@@ -123,8 +128,9 @@ func main() {
 	r.HandleFunc("/ws/guard", handlers.ServeGuardWS)
 	r.HandleFunc("/ws/admin", handlers.ServeAdminWS)
 
-	// Guard PWA REST endpoint — auth via X-Guard-Token header (no JWT required)
+	// Guard PWA REST endpoints — auth via X-Guard-Token header (no JWT required)
 	r.HandleFunc("/api/guard/incidents", handlers.GuardCreateIncident).Methods("POST")
+	r.HandleFunc("/api/guard/shifts", handlers.GuardGetShifts).Methods("GET")
 
 	// Live guard status + incidents (manager/superadmin only, via subrouter)
 	guardsRouter.HandleFunc("/live", handlers.GetConnectedGuards).Methods("GET")

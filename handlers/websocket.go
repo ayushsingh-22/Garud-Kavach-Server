@@ -337,6 +337,22 @@ func (c *GuardClient) handleClockIn(msg IncomingMsg) {
 		`UPDATE guards SET clocked_in=TRUE, clocked_in_at=$1 WHERE id=$2`,
 		now, c.guardID,
 	)
+
+	// Mark the guard's current scheduled shift as in_progress
+	_, _ = db.DB.Exec(`
+		UPDATE shifts SET status = 'in_progress'
+		WHERE id = (
+			SELECT id FROM shifts
+			WHERE guard_id    = $1
+			  AND start_time <= $2
+			  AND end_time   >= $2
+			  AND status      = 'scheduled'
+			  AND deleted_at IS NULL
+			ORDER BY start_time DESC
+			LIMIT 1
+		)
+	`, c.guardID, now)
+
 	update := OutgoingMsg{
 		Type:      "guard_update",
 		GuardID:   c.guardID,
@@ -358,6 +374,28 @@ func (c *GuardClient) handleClockIn(msg IncomingMsg) {
 
 func (c *GuardClient) handleClockOut(msg IncomingMsg) {
 	now := time.Now().UTC()
+
+	// Calculate actual_hours from clocked_in_at and update the active shift
+	var clockedInAt *time.Time
+	if err := db.DB.QueryRow(
+		`SELECT clocked_in_at FROM guards WHERE id=$1`, c.guardID,
+	).Scan(&clockedInAt); err == nil && clockedInAt != nil {
+		actualHours := now.Sub(*clockedInAt).Hours()
+		// Update the most recent in_progress or scheduled shift with actual hours and mark completed
+		_, _ = db.DB.Exec(`
+			UPDATE shifts
+			SET actual_hours = $1, status = 'completed'
+			WHERE id = (
+				SELECT id FROM shifts
+				WHERE guard_id = $2
+				  AND status IN ('in_progress', 'scheduled')
+				  AND deleted_at IS NULL
+				ORDER BY start_time DESC
+				LIMIT 1
+			)
+		`, actualHours, c.guardID)
+	}
+
 	_, _ = db.DB.Exec(
 		`UPDATE guards SET clocked_in=FALSE, clocked_in_at=NULL WHERE id=$1`,
 		c.guardID,
@@ -797,4 +835,60 @@ func GuardCreateIncident(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": incidentID, "ok": true})
+}
+
+// GuardGetShifts handles GET /api/guard/shifts
+// Authenticated via X-Guard-Token header — returns only the requesting guard's own shifts.
+func GuardGetShifts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	token := r.Header.Get("X-Guard-Token")
+	if token == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing guard token"})
+		return
+	}
+
+	var guardID int
+	err := db.DB.QueryRow(
+		`SELECT id FROM guards WHERE guard_token = $1 AND deleted_at IS NULL`, token,
+	).Scan(&guardID)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid token"})
+		return
+	}
+
+	rows, err := db.DB.Query(`
+		SELECT s.id, s.guard_id, g.name AS guard_name, s.query_id,
+		       COALESCE(q.name, '') AS client_name,
+		       s.start_time, s.end_time,
+		       COALESCE(s.actual_hours, 0), s.status
+		FROM shifts s
+		LEFT JOIN guards g ON s.guard_id = g.id
+		LEFT JOIN queries q ON s.query_id = q.id
+		WHERE s.guard_id = $1 AND s.deleted_at IS NULL
+		ORDER BY s.start_time DESC
+		LIMIT 50
+	`, guardID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to retrieve shifts"})
+		return
+	}
+	defer rows.Close()
+
+	shifts := []Shift{}
+	for rows.Next() {
+		var s Shift
+		if err := rows.Scan(&s.ID, &s.GuardID, &s.GuardName, &s.QueryID, &s.ClientName,
+			&s.StartTime, &s.EndTime, &s.ActualHours, &s.Status); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to scan shifts"})
+			return
+		}
+		shifts = append(shifts, s)
+	}
+
+	_ = json.NewEncoder(w).Encode(shifts)
 }
