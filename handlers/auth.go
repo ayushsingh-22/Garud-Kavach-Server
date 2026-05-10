@@ -25,11 +25,11 @@ func isProduction() bool {
 	return os.Getenv("APP_ENV") == "production"
 }
 
-// cookieSameSite returns Strict in production, Lax in development.
-// Lax allows cookies to be sent through the Vite proxy on HTTP localhost.
+// cookieSameSite returns None in production (cross-origin frontend/backend),
+// Lax in development (same-origin via Vite proxy).
 func cookieSameSite() http.SameSite {
 	if isProduction() {
-		return http.SameSiteStrictMode
+		return http.SameSiteNoneMode
 	}
 	return http.SameSiteLaxMode
 }
