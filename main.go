@@ -47,6 +47,12 @@ func main() {
 	r.HandleFunc("/api/add-query", handlers.AddQuery).Methods("POST")
 	r.Handle("/api/chat", middleware.ChatRateLimit(http.HandlerFunc(handlers.ChatHandler))).Methods("POST")
 
+	// Guard PWA REST endpoints — auth via X-Guard-Token header (no JWT required)
+	// Must be registered BEFORE the /api subrouter so they aren't caught by JWTAuthMiddleware.
+	r.HandleFunc("/api/guard/profile", handlers.GuardGetProfile).Methods("GET")
+	r.HandleFunc("/api/guard/incidents", handlers.GuardCreateIncident).Methods("POST")
+	r.HandleFunc("/api/guard/shifts", handlers.GuardGetShifts).Methods("GET")
+
 	// Authenticated Routes
 	s := r.PathPrefix("/api").Subrouter()
 	s.Use(handlers.JWTAuthMiddleware)
@@ -127,10 +133,6 @@ func main() {
 	// so they live on the root router (not the JWT subrouter).
 	r.HandleFunc("/ws/guard", handlers.ServeGuardWS)
 	r.HandleFunc("/ws/admin", handlers.ServeAdminWS)
-
-	// Guard PWA REST endpoints — auth via X-Guard-Token header (no JWT required)
-	r.HandleFunc("/api/guard/incidents", handlers.GuardCreateIncident).Methods("POST")
-	r.HandleFunc("/api/guard/shifts", handlers.GuardGetShifts).Methods("GET")
 
 	// Live guard status + incidents (manager/superadmin only, via subrouter)
 	guardsRouter.HandleFunc("/live", handlers.GetConnectedGuards).Methods("GET")

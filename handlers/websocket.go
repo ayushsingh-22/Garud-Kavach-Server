@@ -148,9 +148,9 @@ func (h *Hub) broadcastToAdmins(msg OutgoingMsg) {
 // ─── Guard WebSocket Handler ───────────────────────────────────────────────────
 
 // ServeGuardWS handles guard app WebSocket connections.
-// URL: GET /ws/guard?token={guard_token}
+// URL: GET /ws/guard?license={license_no}
 //
-// IMPORTANT: we upgrade to WS *before* validating the token so that auth
+// IMPORTANT: we upgrade to WS *before* validating the license so that auth
 // failures are delivered as a clean WS close frame (code 4001) rather than
 // an HTTP 4xx response. An HTTP error on a WS upgrade causes an ECONNRESET
 // at every proxy/browser layer, which generates noisy errors and triggers
@@ -163,24 +163,24 @@ func ServeGuardWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := r.URL.Query().Get("token")
-	if token == "" {
+	license := r.URL.Query().Get("license")
+	if license == "" {
 		conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(4001, "missing token"))
+			websocket.FormatCloseMessage(4001, "missing license"))
 		conn.Close()
 		return
 	}
 
-	// Validate token and fetch guard info
+	// Validate license number and fetch guard info
 	var guardID int
 	var guardName string
 	err = db.DB.QueryRow(
-		`SELECT id, name FROM guards WHERE guard_token = $1 AND deleted_at IS NULL`,
-		token,
+		`SELECT id, name FROM guards WHERE license_no = $1 AND deleted_at IS NULL`,
+		license,
 	).Scan(&guardID, &guardName)
 	if err != nil {
 		conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(4001, "invalid token"))
+			websocket.FormatCloseMessage(4001, "invalid license"))
 		conn.Close()
 		return
 	}
@@ -684,24 +684,24 @@ func GetIncidents(w http.ResponseWriter, r *http.Request) {
 }
 
 // GuardCreateIncident handles POST /api/guard/incidents
-// Authenticated via X-Guard-Token header (no JWT required — for Guard PWA).
+// Authenticated via X-Guard-License header (no JWT required — for Guard PWA).
 func GuardCreateIncident(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	token := r.Header.Get("X-Guard-Token")
-	if token == "" {
+	license := r.Header.Get("X-Guard-License")
+	if license == "" {
 		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing guard token"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing license number"})
 		return
 	}
 
 	var guardID int
 	err := db.DB.QueryRow(
-		`SELECT id FROM guards WHERE guard_token = $1 AND deleted_at IS NULL`, token,
+		`SELECT id FROM guards WHERE license_no = $1 AND deleted_at IS NULL`, license,
 	).Scan(&guardID)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid token"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid license number"})
 		return
 	}
 
@@ -838,24 +838,24 @@ func GuardCreateIncident(w http.ResponseWriter, r *http.Request) {
 }
 
 // GuardGetShifts handles GET /api/guard/shifts
-// Authenticated via X-Guard-Token header — returns only the requesting guard's own shifts.
+// Authenticated via X-Guard-License header — returns only the requesting guard's own shifts.
 func GuardGetShifts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	token := r.Header.Get("X-Guard-Token")
-	if token == "" {
+	license := r.Header.Get("X-Guard-License")
+	if license == "" {
 		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing guard token"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing license number"})
 		return
 	}
 
 	var guardID int
 	err := db.DB.QueryRow(
-		`SELECT id FROM guards WHERE guard_token = $1 AND deleted_at IS NULL`, token,
+		`SELECT id FROM guards WHERE license_no = $1 AND deleted_at IS NULL`, license,
 	).Scan(&guardID)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid token"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid license number"})
 		return
 	}
 
@@ -891,4 +891,35 @@ func GuardGetShifts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = json.NewEncoder(w).Encode(shifts)
+}
+
+// GuardGetProfile handles GET /api/guard/profile
+// Authenticated via X-Guard-License header — returns the guard's own profile.
+func GuardGetProfile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	license := r.Header.Get("X-Guard-License")
+	if license == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing license number"})
+		return
+	}
+
+	var g Guard
+	err := db.DB.QueryRow(`
+		SELECT id, name, COALESCE(phone,''), COALESCE(email,''),
+		       COALESCE(address,''), COALESCE(license_no,''),
+		       license_expiry, status, hourly_rate, COALESCE(photo_url,'')
+		FROM guards
+		WHERE license_no = $1 AND deleted_at IS NULL
+	`, license).Scan(&g.ID, &g.Name, &g.Phone, &g.Email,
+		&g.Address, &g.LicenseNo, &g.LicenseExpiry,
+		&g.Status, &g.HourlyRate, &g.PhotoURL)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid token"})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(g)
 }

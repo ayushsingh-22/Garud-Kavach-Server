@@ -37,6 +37,7 @@ type Guard struct {
 	PhotoURL      *string    `json:"photo_url"`
 	AssignedQuery *int       `json:"assigned_query_id,omitempty"`
 	AssignedAt    *time.Time `json:"assigned_at,omitempty"`
+	CreatedAt     *time.Time `json:"created_at,omitempty"`
 }
 
 func optionalString(value string) *string {
@@ -207,7 +208,8 @@ func GetGuards(w http.ResponseWriter, r *http.Request) {
 			g.hourly_rate,
 			g.photo_url,
 			a.query_id,
-			a.assigned_at
+			a.assigned_at,
+			g.created_at
 		FROM guards g
 		LEFT JOIN LATERAL (
 			SELECT query_id, assigned_at
@@ -227,7 +229,7 @@ func GetGuards(w http.ResponseWriter, r *http.Request) {
 	guards := []Guard{}
 	for rows.Next() {
 		var g Guard
-		if err := rows.Scan(&g.ID, &g.Name, &g.Phone, &g.Email, &g.Address, &g.LicenseNo, &g.LicenseExpiry, &g.Status, &g.HourlyRate, &g.PhotoURL, &g.AssignedQuery, &g.AssignedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Phone, &g.Email, &g.Address, &g.LicenseNo, &g.LicenseExpiry, &g.Status, &g.HourlyRate, &g.PhotoURL, &g.AssignedQuery, &g.AssignedAt, &g.CreatedAt); err != nil {
 			http.Error(w, `{"error":"Failed to scan guard data"}`, http.StatusInternalServerError)
 			return
 		}
@@ -259,7 +261,8 @@ func GetGuardByID(w http.ResponseWriter, r *http.Request) {
 			g.hourly_rate,
 			g.photo_url,
 			a.query_id,
-			a.assigned_at
+			a.assigned_at,
+			g.created_at
 		FROM guards g
 		LEFT JOIN LATERAL (
 			SELECT query_id, assigned_at
@@ -281,6 +284,7 @@ func GetGuardByID(w http.ResponseWriter, r *http.Request) {
 		&g.PhotoURL,
 		&g.AssignedQuery,
 		&g.AssignedAt,
+		&g.CreatedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -657,7 +661,8 @@ func GetExpiringGuards(w http.ResponseWriter, r *http.Request) {
 			g.hourly_rate,
 			g.photo_url,
 			a.query_id,
-			a.assigned_at
+			a.assigned_at,
+			g.created_at
 		FROM guards g
 		LEFT JOIN LATERAL (
 			SELECT query_id, assigned_at
@@ -678,7 +683,7 @@ func GetExpiringGuards(w http.ResponseWriter, r *http.Request) {
 	guards := []Guard{}
 	for rows.Next() {
 		var g Guard
-		if err := rows.Scan(&g.ID, &g.Name, &g.Phone, &g.Email, &g.Address, &g.LicenseNo, &g.LicenseExpiry, &g.Status, &g.HourlyRate, &g.PhotoURL, &g.AssignedQuery, &g.AssignedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Phone, &g.Email, &g.Address, &g.LicenseNo, &g.LicenseExpiry, &g.Status, &g.HourlyRate, &g.PhotoURL, &g.AssignedQuery, &g.AssignedAt, &g.CreatedAt); err != nil {
 			http.Error(w, `{"error":"Failed to scan guard data"}`, http.StatusInternalServerError)
 			return
 		}
