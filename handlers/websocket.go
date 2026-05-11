@@ -378,7 +378,7 @@ func (c *GuardClient) handleClockOut(msg IncomingMsg) {
 	// Calculate actual_hours from clocked_in_at and update the active shift
 	var clockedInAt *time.Time
 	if err := db.DB.QueryRow(
-		`SELECT clocked_in_at FROM guards WHERE id=$1`, c.guardID,
+		`SELECT clocked_in_at FROM guards WHERE id=$1 AND deleted_at IS NULL`, c.guardID,
 	).Scan(&clockedInAt); err == nil && clockedInAt != nil {
 		actualHours := now.Sub(*clockedInAt).Hours()
 		// Update the most recent in_progress or scheduled shift with actual hours and mark completed
@@ -765,7 +765,7 @@ func GuardCreateIncident(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		guardNameForNotif := ""
 		var gn string
-		if qErr := db.DB.QueryRow(`SELECT name FROM guards WHERE id=$1`, guardID).Scan(&gn); qErr == nil {
+		if qErr := db.DB.QueryRow(`SELECT name FROM guards WHERE id=$1 AND deleted_at IS NULL`, guardID).Scan(&gn); qErr == nil {
 			guardNameForNotif = gn
 		}
 		notifType := "warning"
@@ -786,7 +786,7 @@ func GuardCreateIncident(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Fetch guard name from DB if not in hub
 		var gn string
-		if qErr := db.DB.QueryRow(`SELECT name FROM guards WHERE id=$1`, guardID).Scan(&gn); qErr == nil {
+		if qErr := db.DB.QueryRow(`SELECT name FROM guards WHERE id=$1 AND deleted_at IS NULL`, guardID).Scan(&gn); qErr == nil {
 			guardName = gn
 		}
 	}
@@ -895,6 +895,40 @@ func GuardGetShifts(w http.ResponseWriter, r *http.Request) {
 
 // GuardGetProfile handles GET /api/guard/profile
 // Authenticated via X-Guard-License header — returns the guard's own profile.
+// GuardValidateLicense checks whether a guard license_no exists in the DB.
+// Called by the Guard PWA before connecting the WebSocket so the user gets
+// an immediate error instead of a silent disconnect.
+func GuardValidateLicense(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	license := r.URL.Query().Get("license")
+	if license == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing license number"})
+		return
+	}
+
+	var guardID int
+	var status string
+	err := db.DB.QueryRow(
+		`SELECT id, status FROM guards WHERE license_no = $1 AND deleted_at IS NULL`, license,
+	).Scan(&guardID, &status)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "No guard found with this license number"})
+		return
+	}
+
+	if status != "active" {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Guard account is not active. Contact your manager."})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"valid": true, "guard_id": guardID})
+}
+
 func GuardGetProfile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 

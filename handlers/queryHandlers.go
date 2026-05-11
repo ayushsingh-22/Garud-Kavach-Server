@@ -83,7 +83,7 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 	var guardsRemoved bool
 	if status != "Resolved" {
 		result2, delErr := db.DB.Exec(
-			"UPDATE shifts SET deleted_at = NOW() WHERE query_id = $1 AND deleted_at IS NULL",
+			"DELETE FROM shifts WHERE query_id = $1",
 			req.ID,
 		)
 		if delErr != nil {
@@ -110,7 +110,7 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 		var queryUserID *int
 		var queryEmail, queryName string
 		err := db.DB.QueryRow(
-			"SELECT user_id, email, name FROM queries WHERE id = $1",
+			"SELECT user_id, email, name FROM queries WHERE id = $1 AND deleted_at IS NULL",
 			req.ID,
 		).Scan(&queryUserID, &queryEmail, &queryName)
 		if err != nil {

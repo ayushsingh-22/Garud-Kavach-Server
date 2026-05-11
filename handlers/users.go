@@ -432,7 +432,19 @@ func SoftDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := db.DB.Exec("UPDATE users SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL", id)
+	tx, err := db.DB.Begin()
+	if err != nil {
+		http.Error(w, `{"error":"Failed to delete user"}`, http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	// Nullify FK references with NO ACTION constraints
+	tx.Exec("UPDATE expenses SET added_by = NULL WHERE added_by = $1", id)
+	tx.Exec("UPDATE leave_requests SET reviewed_by = NULL WHERE reviewed_by = $1", id)
+	tx.Exec("DELETE FROM customers WHERE user_id = $1", id)
+
+	result, err := tx.Exec("DELETE FROM users WHERE id = $1", id)
 	if err != nil {
 		http.Error(w, `{"error":"Failed to delete user"}`, http.StatusInternalServerError)
 		return
@@ -441,6 +453,11 @@ func SoftDeleteUser(w http.ResponseWriter, r *http.Request) {
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		http.Error(w, `{"error":"User not found"}`, http.StatusNotFound)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, `{"error":"Failed to delete user"}`, http.StatusInternalServerError)
 		return
 	}
 

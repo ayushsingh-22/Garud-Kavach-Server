@@ -488,7 +488,7 @@ func UpdateGuard(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(g)
 }
 
-// SoftDeleteGuard marks a guard as deleted.
+// SoftDeleteGuard permanently deletes a guard and all related records.
 func SoftDeleteGuard(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id, err := strconv.Atoi(vars["id"])
@@ -497,7 +497,20 @@ func SoftDeleteGuard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := db.DB.Exec("UPDATE guards SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL", id)
+	tx, err := db.DB.Begin()
+	if err != nil {
+		http.Error(w, `{"error":"Failed to delete guard"}`, http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	// Remove child records with NO ACTION FK constraints
+	tx.Exec("DELETE FROM guard_query_assignments WHERE guard_id = $1", id)
+	tx.Exec("DELETE FROM shifts WHERE guard_id = $1", id)
+	tx.Exec("DELETE FROM payroll WHERE guard_id = $1", id)
+	tx.Exec("DELETE FROM leave_requests WHERE guard_id = $1", id)
+
+	result, err := tx.Exec("DELETE FROM guards WHERE id = $1", id)
 	if err != nil {
 		http.Error(w, `{"error":"Failed to delete guard"}`, http.StatusInternalServerError)
 		return
@@ -506,6 +519,11 @@ func SoftDeleteGuard(w http.ResponseWriter, r *http.Request) {
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		http.Error(w, `{"error":"Guard not found"}`, http.StatusNotFound)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, `{"error":"Failed to delete guard"}`, http.StatusInternalServerError)
 		return
 	}
 
@@ -622,7 +640,7 @@ func AssignGuard(w http.ResponseWriter, r *http.Request) {
 		var queryUserID *int
 		var queryEmail, queryName string
 		err := db.DB.QueryRow(
-			"SELECT user_id, email, name FROM queries WHERE id = $1",
+			"SELECT user_id, email, name FROM queries WHERE id = $1 AND deleted_at IS NULL",
 			req.QueryID,
 		).Scan(&queryUserID, &queryEmail, &queryName)
 		if err != nil {

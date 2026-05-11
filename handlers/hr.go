@@ -283,7 +283,7 @@ func GetPayroll(w http.ResponseWriter, r *http.Request) {
 			       SUM(COALESCE(s.paid_hours, COALESCE(s.actual_hours, 0))),
 			       g.hourly_rate
 			FROM shifts s
-			LEFT JOIN guards g ON s.guard_id = g.id
+			JOIN guards g ON s.guard_id = g.id AND g.deleted_at IS NULL
 			WHERE TO_CHAR(s.start_time, 'YYYY-MM') = $1
 			  AND s.deleted_at IS NULL
 			GROUP BY s.guard_id, g.name, g.hourly_rate
@@ -358,7 +358,7 @@ func FinalizePayroll(w http.ResponseWriter, r *http.Request) {
 		    (SUM(COALESCE(s.paid_hours, COALESCE(s.actual_hours, 0))) + SUM(COALESCE(s.overtime_hours, 0))) * g.hourly_rate,
 		    'pending'
 		FROM shifts s
-		LEFT JOIN guards g ON s.guard_id = g.id
+		JOIN guards g ON s.guard_id = g.id AND g.deleted_at IS NULL
 		WHERE TO_CHAR(s.start_time, 'YYYY-MM') = $2
 		  AND s.deleted_at IS NULL
 		GROUP BY s.guard_id, g.hourly_rate

@@ -38,6 +38,13 @@ func main() {
 	}
 	r := mux.NewRouter()
 
+	// Health check — used by frontends to detect if this backend is reachable
+	r.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	}).Methods("GET")
+
 	// Public Routes
 	r.HandleFunc("/api/signup", handlers.SignUpHandler).Methods("POST")
 	r.HandleFunc("/api/register", handlers.RegisterCustomerHandler).Methods("POST")
@@ -49,6 +56,7 @@ func main() {
 
 	// Guard PWA REST endpoints — auth via X-Guard-Token header (no JWT required)
 	// Must be registered BEFORE the /api subrouter so they aren't caught by JWTAuthMiddleware.
+	r.HandleFunc("/api/guard/validate-license", handlers.GuardValidateLicense).Methods("GET")
 	r.HandleFunc("/api/guard/profile", handlers.GuardGetProfile).Methods("GET")
 	r.HandleFunc("/api/guard/incidents", handlers.GuardCreateIncident).Methods("POST")
 	r.HandleFunc("/api/guard/shifts", handlers.GuardGetShifts).Methods("GET")
