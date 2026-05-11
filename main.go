@@ -38,9 +38,15 @@ func main() {
 	}
 	r := mux.NewRouter()
 
-	// Health check — used by frontends to detect if this backend is reachable
+	// Health check — used by frontends to detect if this backend is reachable.
+	// Also pings the database to wake Neon from sleep if needed.
 	r.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if err := db.DB.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"db_unavailable"}`))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	}).Methods("GET")

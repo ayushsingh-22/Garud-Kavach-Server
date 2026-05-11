@@ -39,4 +39,16 @@ func Init() {
 	`)
 
 	log.Println("Database connection successful.")
+
+	// Keep Neon awake — ping every 4 minutes to prevent the compute endpoint
+	// from sleeping due to inactivity (free-tier suspends after ~5 min).
+	go func() {
+		ticker := time.NewTicker(4 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := DB.Ping(); err != nil {
+				log.Printf("[db] keep-alive ping failed: %v", err)
+			}
+		}
+	}()
 }
