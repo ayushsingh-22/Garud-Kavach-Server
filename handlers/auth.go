@@ -213,7 +213,11 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 	})
 
-	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Login successful"})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":       "Login successful",
+		"access_token":  accessTokenString,
+		"refresh_token": rawRefresh,
+	})
 }
 
 // RefreshTokenHandler issues a new access_token when presented with a valid,
@@ -223,8 +227,18 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 func RefreshTokenHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	cookie, err := r.Cookie("refresh_token")
-	if err != nil || cookie.Value == "" {
+	// Accept refresh token from cookie OR request body (for cross-origin clients).
+	var rawRefreshToken string
+	if c, err := r.Cookie("refresh_token"); err == nil && c.Value != "" {
+		rawRefreshToken = c.Value
+	} else {
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		rawRefreshToken = body.RefreshToken
+	}
+	if rawRefreshToken == "" {
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Missing refresh token"})
 		return
@@ -254,7 +268,7 @@ func RefreshTokenHandler(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&sid, &uid, &hash); err != nil {
 			continue
 		}
-		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(cookie.Value)) == nil {
+		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(rawRefreshToken)) == nil {
 			sessionID = sid
 			sessionUserID = uid
 			found = true
@@ -300,7 +314,10 @@ func RefreshTokenHandler(w http.ResponseWriter, r *http.Request) {
 		Expires:  time.Now().Add(15 * time.Minute),
 	})
 
-	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Token refreshed"})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":      "Token refreshed",
+		"access_token": accessTokenString,
+	})
 }
 
 func CheckLoginHandler(w http.ResponseWriter, r *http.Request) {
@@ -326,9 +343,18 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If there is a refresh_token cookie, revoke the session in the DB so that
-	// even an intercepted token cannot be used to obtain new access tokens.
-	if cookie, err := r.Cookie("refresh_token"); err == nil && cookie.Value != "" {
+	// Revoke the refresh session — accept token from cookie or request body.
+	var logoutRefreshToken string
+	if c, err := r.Cookie("refresh_token"); err == nil && c.Value != "" {
+		logoutRefreshToken = c.Value
+	} else {
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		logoutRefreshToken = body.RefreshToken
+	}
+	if logoutRefreshToken != "" {
 		rows, qErr := db.DB.Query(
 			`SELECT id, refresh_token_hash FROM user_sessions
 			 WHERE revoked_at IS NULL AND expires_at > NOW()`,
@@ -341,7 +367,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 				if scanErr := rows.Scan(&sid, &hash); scanErr != nil {
 					continue
 				}
-				if bcrypt.CompareHashAndPassword([]byte(hash), []byte(cookie.Value)) == nil {
+				if bcrypt.CompareHashAndPassword([]byte(hash), []byte(logoutRefreshToken)) == nil {
 					_, _ = db.DB.Exec(
 						"UPDATE user_sessions SET revoked_at = NOW() WHERE id = $1",
 						sid,
