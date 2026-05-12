@@ -2,6 +2,7 @@ package services
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"time"
 )
@@ -80,15 +81,26 @@ func checkExpiringLicenses(database *sql.DB) {
 	}
 
 	// Build HTML email body
-	body := "<h2>Guard License Expiry Alert</h2><p>The following guards have licenses expiring within 7 days:</p><ul>"
+	tableRows := ""
 	for _, g := range expiring {
-		body += "<li><strong>" + g.Name + "</strong>"
+		licInfo := ""
 		if g.LicenseNo != "" {
-			body += " (License: " + g.LicenseNo + ")"
+			licInfo = g.LicenseNo
 		}
-		body += " — Expires: " + g.LicenseExpiry.Format("2006-01-02") + "</li>"
+		tableRows += fmt.Sprintf(
+			`<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-weight:600;">%s</td>`+
+				`<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;">%s</td>`+
+				`<td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#dc2626;font-weight:600;">%s</td></tr>`,
+			g.Name, licInfo, g.LicenseExpiry.Format("02 Jan 2006"),
+		)
 	}
-	body += "</ul>"
+	emailContent := `<p>The following guards have licenses expiring within <strong>7 days</strong>. Please take action immediately.</p>` +
+		`<table style="margin:16px 0;border-collapse:collapse;width:100%;font-size:14px;">` +
+		`<tr style="background-color:#f8fafc;"><th style="padding:10px 12px;text-align:left;color:#64748b;font-size:12px;text-transform:uppercase;">Guard Name</th>` +
+		`<th style="padding:10px 12px;text-align:left;color:#64748b;font-size:12px;text-transform:uppercase;">License No.</th>` +
+		`<th style="padding:10px 12px;text-align:left;color:#64748b;font-size:12px;text-transform:uppercase;">Expiry Date</th></tr>` +
+		tableRows + `</table>`
+	body := EmailTemplate("License Expiry Alert", emailContent, fmt.Sprintf("%d guard(s) require immediate attention.", len(expiring)))
 
 	// Send to all HR users
 	hrRows, err := database.Query("SELECT email, COALESCE(name, email) FROM users WHERE role = 'hr' AND deleted_at IS NULL")

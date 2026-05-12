@@ -134,9 +134,25 @@ func UpdateQueryStatus(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if strings.TrimSpace(queryEmail) != "" {
-			subject := fmt.Sprintf("Service Request Update — %s", status)
-			body := fmt.Sprintf("<h2>Hello %s,</h2><p>%s</p><p>Reference: #%d</p>", queryName, msg, req.ID)
-			services.EnqueueEmail(queryEmail, queryName, subject, body)
+			subject := fmt.Sprintf("Service Request Update — #%d", req.ID)
+			greeting := fmt.Sprintf("Hello %s,", queryName)
+			emailBody := fmt.Sprintf(
+				`<p>Your service request <strong>#%d</strong> has been updated.</p>
+				<table style="margin:16px 0;border-collapse:collapse;">
+					<tr><td style="padding:8px 16px 8px 0;color:#64748b;font-size:14px;">New Status:</td><td style="padding:8px 0;">%s</td></tr>
+					<tr><td style="padding:8px 16px 8px 0;color:#64748b;font-size:14px;">Reference:</td><td style="padding:8px 0;font-weight:600;">#%d</td></tr>
+				</table>`,
+				req.ID, services.StatusBadge(status), req.ID,
+			)
+			if len(assignedGuards) > 0 {
+				names := make([]string, len(assignedGuards))
+				for i, g := range assignedGuards {
+					names[i] = g.GuardName
+				}
+				emailBody += fmt.Sprintf(`<p style="margin-top:12px;"><strong>Assigned Guards:</strong> %s</p>`, strings.Join(names, ", "))
+			}
+			footer := "If you have questions, reply to this email or contact our support team."
+			services.EnqueueEmail(queryEmail, queryName, subject, services.EmailTemplate(greeting, emailBody, footer))
 		}
 	}()
 

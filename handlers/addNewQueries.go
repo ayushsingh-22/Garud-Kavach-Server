@@ -172,11 +172,23 @@ func AddQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Phase 6: Email the customer if they provided an email
 	if strings.TrimSpace(newQuery.Email) != "" {
+		greeting := fmt.Sprintf("Thank you, %s!", newQuery.Name)
+		emailBody := fmt.Sprintf(
+			`<p>We have received your service request and our team will review it shortly.</p>
+			<table style="margin:16px 0;border-collapse:collapse;">
+				<tr><td style="padding:8px 16px 8px 0;color:#64748b;font-size:14px;">Reference:</td><td style="padding:8px 0;font-weight:600;">#%d</td></tr>
+				<tr><td style="padding:8px 16px 8px 0;color:#64748b;font-size:14px;">Service:</td><td style="padding:8px 0;">%s</td></tr>
+				<tr><td style="padding:8px 16px 8px 0;color:#64748b;font-size:14px;">Status:</td><td style="padding:8px 0;">%s</td></tr>
+			</table>
+			<p>We will notify you as soon as there is an update on your request.</p>`,
+			insertedID, newQuery.Service, services.StatusBadge("Pending"),
+		)
+		footer := "If you have questions, reply to this email or contact our support team."
 		services.EnqueueEmail(
 			newQuery.Email,
 			newQuery.Name,
 			fmt.Sprintf("We received your request — Reference #%d", insertedID),
-			fmt.Sprintf("<h2>Thank you, %s!</h2><p>We have received your service request (Reference #%d). Our team will review it shortly and get back to you.</p><p>Service: %s</p>", newQuery.Name, insertedID, newQuery.Service),
+			services.EmailTemplate(greeting, emailBody, footer),
 		)
 	}
 

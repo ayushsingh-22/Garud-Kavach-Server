@@ -653,9 +653,16 @@ func AssignGuard(w http.ResponseWriter, r *http.Request) {
 			_ = helpers.CreateNotification(db.DB, *queryUserID, msg, "success")
 		}
 		if strings.TrimSpace(queryEmail) != "" {
+			greeting := fmt.Sprintf("Hello %s,", queryName)
+			emailBody := fmt.Sprintf(
+				`<p>Great news! A security guard has been assigned to your service request <strong>#%d</strong>.</p>
+				<p>Our team is now preparing to serve you. You will receive further details about the deployment schedule shortly.</p>`,
+				req.QueryID,
+			)
+			footer := "If you have questions, reply to this email or contact our support team."
 			services.EnqueueEmail(queryEmail, queryName,
 				fmt.Sprintf("Guard Assigned — Reference #%d", req.QueryID),
-				fmt.Sprintf("<h2>Hello %s,</h2><p>%s. Our team is preparing to serve you.</p>", queryName, msg),
+				services.EmailTemplate(greeting, emailBody, footer),
 			)
 		}
 	}()

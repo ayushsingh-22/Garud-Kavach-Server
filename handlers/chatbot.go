@@ -182,9 +182,14 @@ func handleContactActions(actions []chatSvc.ChatAction) []chatSvc.ChatAction {
 			p.Email,
 			p.Name,
 			"We received your enquiry — Garud Kavach",
-			"<h2>Thank you, "+html.EscapeString(p.Name)+"!</h2>"+
+			services.EmailTemplate(
+				"Thank you, "+html.EscapeString(p.Name)+"!",
 				"<p>We have received your enquiry and our team will respond shortly.</p>"+
-				"<p>Your message: "+html.EscapeString(p.Message)+"</p>",
+					`<div style="margin:16px 0;padding:12px 16px;background-color:#f8fafc;border-left:3px solid #ea580c;border-radius:4px;">`+
+					"<p style=\"margin:0;color:#475569;font-size:14px;\"><strong>Your message:</strong></p>"+
+					"<p style=\"margin:8px 0 0;color:#334155;\">"+html.EscapeString(p.Message)+"</p></div>",
+				"Our team typically responds within 24 hours.",
+			),
 		)
 
 		// Forward the enquiry to the company inbox using the same pipeline.
@@ -192,10 +197,15 @@ func handleContactActions(actions []chatSvc.ChatAction) []chatSvc.ChatAction {
 			"contact@rakshakservice.com",
 			"Garud Kavach Team",
 			"Chatbot Enquiry from "+html.EscapeString(p.Name),
-			"<h2>Chatbot Contact Request</h2>"+
-				"<p><strong>Name:</strong> "+html.EscapeString(p.Name)+"</p>"+
-				"<p><strong>Email:</strong> "+html.EscapeString(p.Email)+"</p>"+
-				"<p><strong>Message:</strong><br>"+html.EscapeString(p.Message)+"</p>",
+			services.EmailTemplate(
+				"New Chatbot Enquiry",
+				`<table style="margin:12px 0;border-collapse:collapse;width:100%;">`+
+					`<tr><td style="padding:8px 16px 8px 0;color:#64748b;font-size:14px;vertical-align:top;">Name:</td><td style="padding:8px 0;font-weight:600;">`+html.EscapeString(p.Name)+`</td></tr>`+
+					`<tr><td style="padding:8px 16px 8px 0;color:#64748b;font-size:14px;vertical-align:top;">Email:</td><td style="padding:8px 0;">`+html.EscapeString(p.Email)+`</td></tr>`+
+					`<tr><td style="padding:8px 16px 8px 0;color:#64748b;font-size:14px;vertical-align:top;">Message:</td><td style="padding:8px 0;">`+html.EscapeString(p.Message)+`</td></tr>`+
+					`</table>`,
+				"Respond to the customer within 24 hours.",
+			),
 		)
 
 		log.Printf("[chat] contact_request dispatched via email pipeline for email=%s", p.Email)
