@@ -164,7 +164,7 @@ func main() {
 		AllowOriginFunc:  handlers.IsAllowedOrigin,
 		AllowCredentials: true,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "X-Guard-Token", "Authorization"},
+		AllowedHeaders:   []string{"Content-Type", "X-Guard-Token", "X-Guard-License", "Authorization"},
 	})
 
 	// Start server
