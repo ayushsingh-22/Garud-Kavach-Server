@@ -55,11 +55,13 @@ func IsAllowedOrigin(origin string) bool {
 		}
 	}
 
-	// Production domain from env
-	if prod := os.Getenv("FRONTEND_URL"); prod != "" {
-		for _, allowed := range strings.Split(prod, ",") {
-			if strings.EqualFold(strings.TrimSpace(allowed), origin) {
-				return true
+	// Production domains from env (comma-separated)
+	for _, envKey := range []string{"FRONTEND_URL", "GUARD_FRONTEND_URL"} {
+		if prod := os.Getenv(envKey); prod != "" {
+			for _, allowed := range strings.Split(prod, ",") {
+				if strings.EqualFold(strings.TrimSpace(allowed), origin) {
+					return true
+				}
 			}
 		}
 	}
